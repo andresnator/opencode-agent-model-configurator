@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto"
 import { mkdir, open, readFile, rename, rm } from "node:fs/promises"
 import path from "node:path"
+import { TextDecoder } from "node:util"
 import type { ModelOption } from "./domain"
 import { globalConfigRoot, type RuntimePaths } from "./persistence"
 
@@ -11,6 +12,7 @@ const PRESET_DOCUMENT_KEYS = ["version", "presets"] as const
 const PRESET_KEYS = ["name", "savedAt", "assignments"] as const
 const ASSIGNMENT_KEYS = ["model", "variant"] as const
 const FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"])
+const FATAL_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })
 
 export type PresetAssignment = {
   model: string
@@ -33,12 +35,18 @@ export function presetsFile(runtime: RuntimePaths): string {
 }
 
 export async function loadPresets(file: string): Promise<StoredPreset[]> {
-  let content: string
+  let bytes: Buffer
   try {
-    content = await readFile(file, "utf8")
+    bytes = await readFile(file)
   } catch (error) {
     if (isMissing(error)) return []
     throw unreadablePresetStorage(file, error)
+  }
+  let content: string
+  try {
+    content = FATAL_UTF8_DECODER.decode(bytes)
+  } catch {
+    throw invalidPresetStorage(file, "file is not valid UTF-8")
   }
   let parsed: unknown
   try {
@@ -47,27 +55,7 @@ export async function loadPresets(file: string): Promise<StoredPreset[]> {
     throw invalidPresetStorage(file, "malformed JSON")
   }
 
-  if (!isRecord(parsed)) throw invalidPresetStorage(file, "root must be an object")
-  assertExactKeys(parsed, PRESET_DOCUMENT_KEYS, "root", file)
-  if (!Object.hasOwn(parsed, "version")) throw invalidPresetStorage(file, "version is missing")
-  if (typeof parsed.version !== "number") throw invalidPresetStorage(file, "version must be numeric")
-  if (parsed.version !== PRESETS_VERSION) {
-    throw invalidPresetStorage(file, `unsupported version ${String(parsed.version)}`)
-  }
-  if (!Object.hasOwn(parsed, "presets")) throw invalidPresetStorage(file, "presets is missing")
-  if (!Array.isArray(parsed.presets)) throw invalidPresetStorage(file, "presets must be an array")
-
-  const presets: StoredPreset[] = []
-  const names = new Set<string>()
-  for (const [index, raw] of parsed.presets.entries()) {
-    const preset = validatePreset(raw, index, file)
-    if (names.has(preset.name)) {
-      throw invalidPresetStorage(file, `duplicate preset name '${preset.name}' at presets[${index}].name`)
-    }
-    names.add(preset.name)
-    presets.push(preset)
-  }
-  return presets.sort((left, right) => left.name.localeCompare(right.name))
+  return validatePresetDocument(parsed, file)
 }
 
 export async function savePreset(file: string, preset: StoredPreset): Promise<void> {
@@ -106,13 +94,17 @@ export function partitionPresetAssignments(
 }
 
 async function writePresets(file: string, presets: readonly StoredPreset[]): Promise<void> {
-  const rendered = `${JSON.stringify({ version: PRESETS_VERSION, presets }, null, 2)}\n`
+  const document = { version: PRESETS_VERSION, presets }
+  validatePresetDocument(document, file)
+  const rendered = `${JSON.stringify(document, null, 2)}\n`
   const directory = path.dirname(file)
   await mkdir(directory, { recursive: true, mode: 0o700 })
   const suffix = `${timestamp()}-${randomBytes(3).toString("hex")}`
   const temporary = `${file}.${suffix}.tmp`
+  let temporaryOwned = false
   try {
     const handle = await open(temporary, "wx", DEFAULT_FILE_MODE)
+    temporaryOwned = true
     try {
       await handle.writeFile(rendered, "utf8")
       await handle.sync()
@@ -120,11 +112,36 @@ async function writePresets(file: string, presets: readonly StoredPreset[]): Pro
       await handle.close()
     }
     await rename(temporary, file)
+    temporaryOwned = false
     await syncDirectory(directory)
   } catch (error) {
-    await rm(temporary, { force: true }).catch(() => undefined)
+    if (temporaryOwned) await rm(temporary, { force: true }).catch(() => undefined)
     throw error
   }
+}
+
+function validatePresetDocument(raw: unknown, file: string): StoredPreset[] {
+  if (!isRecord(raw)) throw invalidPresetStorage(file, "root must be an object")
+  assertExactKeys(raw, PRESET_DOCUMENT_KEYS, "root", file)
+  if (!Object.hasOwn(raw, "version")) throw invalidPresetStorage(file, "version is missing")
+  if (typeof raw.version !== "number") throw invalidPresetStorage(file, "version must be numeric")
+  if (raw.version !== PRESETS_VERSION) {
+    throw invalidPresetStorage(file, `unsupported version ${String(raw.version)}`)
+  }
+  if (!Object.hasOwn(raw, "presets")) throw invalidPresetStorage(file, "presets is missing")
+  if (!Array.isArray(raw.presets)) throw invalidPresetStorage(file, "presets must be an array")
+
+  const presets: StoredPreset[] = []
+  const names = new Set<string>()
+  for (const [index, value] of raw.presets.entries()) {
+    const preset = validatePreset(value, index, file)
+    if (names.has(preset.name)) {
+      throw invalidPresetStorage(file, `duplicate preset name '${preset.name}' at presets[${index}].name`)
+    }
+    names.add(preset.name)
+    presets.push(preset)
+  }
+  return presets.sort((left, right) => left.name.localeCompare(right.name))
 }
 
 async function syncDirectory(directory: string): Promise<void> {
@@ -140,16 +157,19 @@ function validatePreset(raw: unknown, index: number, file: string): StoredPreset
   const presetPath = `presets[${index}]`
   if (!isRecord(raw)) throw invalidPresetStorage(file, `${presetPath} must be an object`)
   assertExactKeys(raw, PRESET_KEYS, presetPath, file)
-  if (typeof raw.name !== "string" || raw.name.length === 0) {
+  if (!Object.hasOwn(raw, "name") || typeof raw.name !== "string" || raw.name.length === 0) {
     throw invalidPresetStorage(file, `${presetPath}.name must be a non-empty string`)
   }
-  if (typeof raw.savedAt !== "string") throw invalidPresetStorage(file, `${presetPath}.savedAt must be a string`)
+  if (!Object.hasOwn(raw, "savedAt") || typeof raw.savedAt !== "string") {
+    throw invalidPresetStorage(file, `${presetPath}.savedAt must be a string`)
+  }
   if (!Object.hasOwn(raw, "assignments")) {
     throw invalidPresetStorage(file, `${presetPath}.assignments is missing`)
   }
   if (!isRecord(raw.assignments)) {
     throw invalidPresetStorage(file, `${presetPath}.assignments must be an object`)
   }
+  const assignments: Record<string, PresetAssignment> = {}
   for (const agent of Object.keys(raw.assignments)) {
     if (FORBIDDEN_KEYS.has(agent)) {
       throw invalidPresetStorage(file, `${presetPath}.assignments: forbidden key '${agent}'`)
@@ -158,17 +178,24 @@ function validatePreset(raw: unknown, index: number, file: string): StoredPreset
     const assignmentPath = `${presetPath}.assignments.${agent}`
     if (!isRecord(value)) throw invalidPresetStorage(file, `${assignmentPath} must be an object`)
     assertExactKeys(value, ASSIGNMENT_KEYS, assignmentPath, file)
-    if (typeof value.model !== "string" || value.model.length === 0) {
+    if (!Object.hasOwn(value, "model") || typeof value.model !== "string" || value.model.length === 0) {
       throw invalidPresetStorage(file, `${assignmentPath}.model must be a non-empty string`)
     }
-    if (Object.hasOwn(value, "variant") && typeof value.variant !== "string") {
-      throw invalidPresetStorage(file, `${assignmentPath}.variant must be a string`)
+    const assignment: PresetAssignment = { model: value.model }
+    if (Object.hasOwn(value, "variant") && value.variant !== undefined) {
+      if (typeof value.variant !== "string") {
+        throw invalidPresetStorage(file, `${assignmentPath}.variant must be a string`)
+      }
+      assignment.variant = value.variant
+    } else {
+      Object.defineProperty(assignment, "variant", { configurable: true, value: undefined, writable: true })
     }
+    assignments[agent] = assignment
   }
   return {
     name: raw.name,
     savedAt: raw.savedAt,
-    assignments: raw.assignments as Record<string, PresetAssignment>,
+    assignments,
   }
 }
 

@@ -632,9 +632,9 @@ function resolvePresetAssignments(
   knownAgents: readonly string[],
 ): Record<string, PresetAssignment> {
   const known = new Set(knownAgents)
-  const resolved: Record<string, AgentMapping> = { ...current }
+  const resolved = Object.assign(Object.create(null) as Record<string, AgentMapping>, current)
   for (const change of changes) resolved[change.agent] = change.after
-  const assignments: Record<string, PresetAssignment> = {}
+  const assignments = Object.create(null) as Record<string, PresetAssignment>
   for (const [agent, mapping] of Object.entries(resolved)) {
     if (!known.has(agent) || !mapping.model) continue
     assignments[agent] = mapping.variant ? { model: mapping.model, variant: mapping.variant } : { model: mapping.model }

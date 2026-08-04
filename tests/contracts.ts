@@ -1,6 +1,8 @@
 import assert from "node:assert/strict"
+import crypto from "node:crypto"
 import { writeFileSync } from "node:fs"
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises"
+import { syncBuiltinESMExports } from "node:module"
 import { homedir, tmpdir } from "node:os"
 import path from "node:path"
 import {
@@ -693,6 +695,60 @@ async function shouldSavePresetWhenApplyingAndSaving(): Promise<void> {
   } finally {
     await rm(scratch.root, { recursive: true, force: true })
   }
+}
+
+async function shouldRejectForbiddenLiveAgentAssignmentsBeforeReplacingPresetStorage(): Promise<void> {
+  for (const agent of ["constructor", "__proto__"]) {
+    const scratch = await createWizardFixture()
+    try {
+      // Given a live agent whose name is forbidden in preset assignment records
+      scratch.agents = [{ name: agent, mode: "primary" }]
+      await writeJson(path.join(scratch.profiles, "default.json"), {
+        name: "default",
+        tiers: { high: { description: "High", variant: "high", agents: [agent] } },
+      })
+      await writeJsonc(path.join(scratch.project, ".opencode", "opencode.jsonc"), '{\n  "agent": {}\n}\n')
+      const presetsPath = path.join(scratch.global, "model-configurator-presets.json")
+      const originalBytes = Buffer.from(
+        '{"version":1,"presets":[{"name":"existing","savedAt":"2026-01-01T00:00:00.000Z","assignments":{}}]}\n',
+      )
+      await mkdir(scratch.global, { recursive: true })
+      await writeFile(presetsPath, originalBytes)
+      const toasts: TuiToast[] = []
+      const api = createFakeApi(scratch, toasts, {
+        select(title, options) {
+          if (title === "Configuration scope") return option(options, "project")
+          if (title === "Agents") return option(options, "default")
+          if (title === "Tier: high") return option(options, "openai/new")
+          if (title === "Variant for openai/new") return option(options, "high")
+          if (title === "Individual overrides") return option(options, "__override_no__")
+          if (title.startsWith("Apply ")) return option(options, "__apply_save__")
+          throw new Error(`unexpected select dialog: ${title}`)
+        },
+        confirm() {
+          return true
+        },
+        prompt(title) {
+          if (title === "Preset name") return "rejected"
+          throw new Error(`unexpected prompt dialog: ${title}`)
+        },
+      })
+
+      // When the configuration is applied and the wizard tries to save the preset
+      await runModelConfigurator(api, scratch.profiles)
+
+      // Then preset validation rejects before replacement and no save success is reported
+      assert.deepEqual(await readFile(presetsPath), originalBytes, `${agent} replaced preset storage`)
+      assert.deepEqual((await readdir(scratch.global)).sort(), ["model-configurator-presets.json"])
+      assert.equal(toasts.some((toast) => toast.message?.includes('Saved preset "rejected".')), false)
+      const errors = toasts.filter((toast) => toast.title === "Preset not saved")
+      assert.equal(errors.length, 1)
+      assert.match(errors[0]?.message ?? "", new RegExp(`forbidden key '${agent}'`))
+    } finally {
+      await rm(scratch.root, { recursive: true, force: true })
+    }
+  }
+  pass("shouldRejectForbiddenLiveAgentAssignmentsBeforeReplacingPresetStorage")
 }
 
 async function shouldApplyPresetSkippingTiersAndOverrides(): Promise<void> {
@@ -1669,6 +1725,69 @@ async function shouldRejectEveryInvalidPresetStorageShapeWhenLoaded(): Promise<v
   }
 }
 
+async function shouldRejectInheritedPresetFieldsAndIgnoreInheritedOptionalValues(): Promise<void> {
+  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-presets-prototype."))
+  try {
+    // Given preset documents missing required own fields and ambient prototype pollution
+    const missingName = path.join(scratch, "missing-name.json")
+    const missingSavedAt = path.join(scratch, "missing-saved-at.json")
+    const missingModel = path.join(scratch, "missing-model.json")
+    const inheritedVariant = path.join(scratch, "inherited-variant.json")
+    await Promise.all([
+      writeJson(missingName, { version: 1, presets: [{ savedAt: "own", assignments: {} }] }),
+      writeJson(missingSavedAt, { version: 1, presets: [{ name: "own", assignments: {} }] }),
+      writeJson(missingModel, {
+        version: 1,
+        presets: [{ name: "own", savedAt: "own", assignments: { alpha: {} } }],
+      }),
+      writeJson(inheritedVariant, {
+        version: 1,
+        presets: [{ name: "own", savedAt: "own", assignments: { alpha: { model: "own-model" } } }],
+      }),
+    ])
+    const pollutedFields = [
+      ["name", "inherited-name"],
+      ["savedAt", "inherited-saved-at"],
+      ["model", "inherited-model"],
+      ["variant", "inherited-variant"],
+    ] as const
+    const previousDescriptors = pollutedFields.map(([key]) => [key, Object.getOwnPropertyDescriptor(Object.prototype, key)] as const)
+    for (const [key, value] of pollutedFields) {
+      Object.defineProperty(Object.prototype, key, { configurable: true, value, writable: true })
+    }
+    try {
+      // When each required field is available only through the prototype
+      const invalidCases = [
+        [missingName, /name must be a non-empty string/],
+        [missingSavedAt, /savedAt must be a string/],
+        [missingModel, /model must be a non-empty string/],
+      ] as const
+
+      // Then inherited required values are rejected
+      for (const [file, reason] of invalidCases) {
+        await assert.rejects(() => loadPresets(file), reason)
+      }
+
+      // And an inherited optional variant never affects a materialized assignment
+      const [preset] = await loadPresets(inheritedVariant)
+      assert.equal(preset.assignments.alpha.variant, undefined)
+      assert.deepEqual(Object.keys(preset.assignments.alpha), ["model"])
+      assert.deepEqual(
+        partitionPresetAssignments(preset.assignments, ["alpha"], [{ id: "own-model", variants: [] }]),
+        { valid: { alpha: { model: "own-model" } }, stale: [] },
+      )
+    } finally {
+      for (const [key, descriptor] of previousDescriptors) {
+        if (descriptor) Object.defineProperty(Object.prototype, key, descriptor)
+        else Reflect.deleteProperty(Object.prototype, key)
+      }
+    }
+    pass("shouldRejectInheritedPresetFieldsAndIgnoreInheritedOptionalValues")
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+}
+
 async function shouldLoadOnlyMissingPresetStorageAsEmptyWhenReadFailsOtherwise(): Promise<void> {
   const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-presets-read."))
   try {
@@ -1692,6 +1811,42 @@ async function shouldLoadOnlyMissingPresetStorageAsEmptyWhenReadFailsOtherwise()
       },
     )
     pass("shouldLoadOnlyMissingPresetStorageAsEmptyWhenReadFailsOtherwise")
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+}
+
+async function shouldRejectInvalidUtf8BeforeLoadingOrMutatingPresetStorage(): Promise<void> {
+  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-presets-utf8."))
+  try {
+    // Given invalid UTF-8 bytes inside an otherwise valid preset document
+    const file = path.join(scratch, "model-configurator-presets.json")
+    const invalidBytes = Buffer.concat([
+      Buffer.from('{"version":1,"presets":[{"name":"'),
+      Buffer.from([0x80]),
+      Buffer.from('","savedAt":"now","assignments":{}}]}\n'),
+    ])
+    await writeFile(file, invalidBytes)
+    const entriesBeforeMutation = (await readdir(scratch)).sort()
+
+    // When storage is loaded directly or as the source of a save
+    const operations = [
+      () => loadPresets(file),
+      () => savePreset(file, { name: "new", savedAt: "now", assignments: {} }),
+    ]
+
+    // Then both reject with a file-qualified UTF-8 reason and preserve every byte
+    for (const operation of operations) {
+      await assert.rejects(operation, (error: unknown) => {
+        assert.ok(error instanceof Error)
+        assert.ok(error.message.includes(file))
+        assert.match(error.message, /UTF-8/i)
+        return true
+      })
+      assert.deepEqual(await readFile(file), invalidBytes)
+      assert.deepEqual((await readdir(scratch)).sort(), entriesBeforeMutation)
+    }
+    pass("shouldRejectInvalidUtf8BeforeLoadingOrMutatingPresetStorage")
   } finally {
     await rm(scratch, { recursive: true, force: true })
   }
@@ -1864,6 +2019,45 @@ async function shouldWriteExactV1BytesAndCleanTemporaryFilesAfterAtomicMutations
     assert.deepEqual(await readdir(scratch), ["model-configurator-presets.json"])
     pass("shouldWriteExactV1BytesAndCleanTemporaryFilesAfterAtomicMutations")
   } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+}
+
+async function shouldPreserveUnownedTemporaryFileWhenExclusiveOpenCollides(): Promise<void> {
+  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-presets-collision."))
+  const originalRandomBytes = crypto.randomBytes
+  const OriginalDate = Date
+  try {
+    // Given another writer owns the exact temporary path selected for this save
+    const file = path.join(scratch, "model-configurator-presets.json")
+    const temporary = `${file}.20260102030405-abcdef.tmp`
+    const unownedBytes = Buffer.from("another writer is still using this file\n")
+    await writeFile(temporary, unownedBytes)
+    crypto.randomBytes = ((size: number) => {
+      assert.equal(size, 3)
+      return Buffer.from("abcdef", "hex")
+    }) as typeof crypto.randomBytes
+    globalThis.Date = class extends OriginalDate {
+      constructor() {
+        super("2026-01-02T03:04:05.000Z")
+      }
+    } as DateConstructor
+    syncBuiltinESMExports()
+
+    // When exclusive creation detects the collision
+    await assert.rejects(
+      () => savePreset(file, { name: "new", savedAt: "2026-01-02T03:04:05.000Z", assignments: {} }),
+      /EEXIST/,
+    )
+
+    // Then the colliding path remains owned and byte-for-byte unchanged
+    assert.deepEqual(await readFile(temporary), unownedBytes)
+    assert.deepEqual((await readdir(scratch)).sort(), [path.basename(temporary)])
+    pass("shouldPreserveUnownedTemporaryFileWhenExclusiveOpenCollides")
+  } finally {
+    crypto.randomBytes = originalRandomBytes
+    globalThis.Date = OriginalDate
+    syncBuiltinESMExports()
     await rm(scratch, { recursive: true, force: true })
   }
 }
@@ -2732,6 +2926,7 @@ await shouldLeaveConfigUntouchedWhenFinalReviewIsCancelled()
 await shouldReshowPreviousDialogWhenEscapingBack()
 await shouldExitWithoutWritingWhenScopeIsEscaped()
 await shouldSavePresetWhenApplyingAndSaving()
+await shouldRejectForbiddenLiveAgentAssignmentsBeforeReplacingPresetStorage()
 await shouldApplyPresetSkippingTiersAndOverrides()
 await shouldDeletePresetWithoutTouchingConfig()
 await shouldKeepCoreApplyAndReportPresetSaveFailureWhenStorageBecomesInvalid()
@@ -2751,11 +2946,14 @@ await shouldExcludeInternalAgentsUntilTheyAreRevealed()
 await shouldMatchAnchoredGlobsWhenEvaluatingPermissionPatterns()
 await shouldRoundTripAndOverwritePresetsWhenSaved()
 await shouldRejectEveryInvalidPresetStorageShapeWhenLoaded()
+await shouldRejectInheritedPresetFieldsAndIgnoreInheritedOptionalValues()
 await shouldLoadOnlyMissingPresetStorageAsEmptyWhenReadFailsOtherwise()
+await shouldRejectInvalidUtf8BeforeLoadingOrMutatingPresetStorage()
 await shouldReturnEveryValidPresetSortedWithoutNormalization()
 await shouldRejectSaveAndDeleteBeforeWritingWhenStorageBecomesInvalid()
 await shouldUseLatestValidStorageForMutationsAndSupportFirstSave()
 await shouldWriteExactV1BytesAndCleanTemporaryFilesAfterAtomicMutations()
+await shouldPreserveUnownedTemporaryFileWhenExclusiveOpenCollides()
 await shouldOverwritePresetWhenSavingUnderExistingName()
 await shouldToastAndRepromptWhenPresetNameIsEmpty()
 await shouldGroupReviewChangesByParentAgent()

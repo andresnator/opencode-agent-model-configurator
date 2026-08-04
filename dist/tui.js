@@ -1909,6 +1909,7 @@ function errorReason(error) {
 import { randomBytes as randomBytes2 } from "node:crypto";
 import { mkdir as mkdir2, open as open2, readFile as readFile3, rename as rename2, rm as rm2 } from "node:fs/promises";
 import path3 from "node:path";
+import { TextDecoder } from "node:util";
 var PRESETS_FILE = "model-configurator-presets.json";
 var PRESETS_VERSION = 1;
 var DEFAULT_FILE_MODE2 = 384;
@@ -1916,16 +1917,23 @@ var PRESET_DOCUMENT_KEYS = ["version", "presets"];
 var PRESET_KEYS = ["name", "savedAt", "assignments"];
 var ASSIGNMENT_KEYS = ["model", "variant"];
 var FORBIDDEN_KEYS = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
+var FATAL_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 function presetsFile(runtime) {
   return path3.join(globalConfigRoot(runtime), PRESETS_FILE);
 }
 async function loadPresets(file) {
-  let content;
+  let bytes;
   try {
-    content = await readFile3(file, "utf8");
+    bytes = await readFile3(file);
   } catch (error) {
     if (isMissing2(error)) return [];
     throw unreadablePresetStorage(file, error);
+  }
+  let content;
+  try {
+    content = FATAL_UTF8_DECODER.decode(bytes);
+  } catch {
+    throw invalidPresetStorage(file, "file is not valid UTF-8");
   }
   let parsed;
   try {
@@ -1933,26 +1941,7 @@ async function loadPresets(file) {
   } catch {
     throw invalidPresetStorage(file, "malformed JSON");
   }
-  if (!isRecord4(parsed)) throw invalidPresetStorage(file, "root must be an object");
-  assertExactKeys(parsed, PRESET_DOCUMENT_KEYS, "root", file);
-  if (!Object.hasOwn(parsed, "version")) throw invalidPresetStorage(file, "version is missing");
-  if (typeof parsed.version !== "number") throw invalidPresetStorage(file, "version must be numeric");
-  if (parsed.version !== PRESETS_VERSION) {
-    throw invalidPresetStorage(file, `unsupported version ${String(parsed.version)}`);
-  }
-  if (!Object.hasOwn(parsed, "presets")) throw invalidPresetStorage(file, "presets is missing");
-  if (!Array.isArray(parsed.presets)) throw invalidPresetStorage(file, "presets must be an array");
-  const presets = [];
-  const names = /* @__PURE__ */ new Set();
-  for (const [index, raw] of parsed.presets.entries()) {
-    const preset = validatePreset(raw, index, file);
-    if (names.has(preset.name)) {
-      throw invalidPresetStorage(file, `duplicate preset name '${preset.name}' at presets[${index}].name`);
-    }
-    names.add(preset.name);
-    presets.push(preset);
-  }
-  return presets.sort((left, right) => left.name.localeCompare(right.name));
+  return validatePresetDocument(parsed, file);
 }
 async function savePreset(file, preset) {
   const existing = await loadPresets(file);
@@ -1982,14 +1971,18 @@ function partitionPresetAssignments(assignments, agents, models) {
   return { valid, stale };
 }
 async function writePresets(file, presets) {
-  const rendered = `${JSON.stringify({ version: PRESETS_VERSION, presets }, null, 2)}
+  const document = { version: PRESETS_VERSION, presets };
+  validatePresetDocument(document, file);
+  const rendered = `${JSON.stringify(document, null, 2)}
 `;
   const directory = path3.dirname(file);
   await mkdir2(directory, { recursive: true, mode: 448 });
   const suffix = `${timestamp2()}-${randomBytes2(3).toString("hex")}`;
   const temporary = `${file}.${suffix}.tmp`;
+  let temporaryOwned = false;
   try {
     const handle = await open2(temporary, "wx", DEFAULT_FILE_MODE2);
+    temporaryOwned = true;
     try {
       await handle.writeFile(rendered, "utf8");
       await handle.sync();
@@ -1997,11 +1990,34 @@ async function writePresets(file, presets) {
       await handle.close();
     }
     await rename2(temporary, file);
+    temporaryOwned = false;
     await syncDirectory2(directory);
   } catch (error) {
-    await rm2(temporary, { force: true }).catch(() => void 0);
+    if (temporaryOwned) await rm2(temporary, { force: true }).catch(() => void 0);
     throw error;
   }
+}
+function validatePresetDocument(raw, file) {
+  if (!isRecord4(raw)) throw invalidPresetStorage(file, "root must be an object");
+  assertExactKeys(raw, PRESET_DOCUMENT_KEYS, "root", file);
+  if (!Object.hasOwn(raw, "version")) throw invalidPresetStorage(file, "version is missing");
+  if (typeof raw.version !== "number") throw invalidPresetStorage(file, "version must be numeric");
+  if (raw.version !== PRESETS_VERSION) {
+    throw invalidPresetStorage(file, `unsupported version ${String(raw.version)}`);
+  }
+  if (!Object.hasOwn(raw, "presets")) throw invalidPresetStorage(file, "presets is missing");
+  if (!Array.isArray(raw.presets)) throw invalidPresetStorage(file, "presets must be an array");
+  const presets = [];
+  const names = /* @__PURE__ */ new Set();
+  for (const [index, value] of raw.presets.entries()) {
+    const preset = validatePreset(value, index, file);
+    if (names.has(preset.name)) {
+      throw invalidPresetStorage(file, `duplicate preset name '${preset.name}' at presets[${index}].name`);
+    }
+    names.add(preset.name);
+    presets.push(preset);
+  }
+  return presets.sort((left, right) => left.name.localeCompare(right.name));
 }
 async function syncDirectory2(directory) {
   const handle = await open2(directory, "r");
@@ -2015,16 +2031,19 @@ function validatePreset(raw, index, file) {
   const presetPath = `presets[${index}]`;
   if (!isRecord4(raw)) throw invalidPresetStorage(file, `${presetPath} must be an object`);
   assertExactKeys(raw, PRESET_KEYS, presetPath, file);
-  if (typeof raw.name !== "string" || raw.name.length === 0) {
+  if (!Object.hasOwn(raw, "name") || typeof raw.name !== "string" || raw.name.length === 0) {
     throw invalidPresetStorage(file, `${presetPath}.name must be a non-empty string`);
   }
-  if (typeof raw.savedAt !== "string") throw invalidPresetStorage(file, `${presetPath}.savedAt must be a string`);
+  if (!Object.hasOwn(raw, "savedAt") || typeof raw.savedAt !== "string") {
+    throw invalidPresetStorage(file, `${presetPath}.savedAt must be a string`);
+  }
   if (!Object.hasOwn(raw, "assignments")) {
     throw invalidPresetStorage(file, `${presetPath}.assignments is missing`);
   }
   if (!isRecord4(raw.assignments)) {
     throw invalidPresetStorage(file, `${presetPath}.assignments must be an object`);
   }
+  const assignments = {};
   for (const agent of Object.keys(raw.assignments)) {
     if (FORBIDDEN_KEYS.has(agent)) {
       throw invalidPresetStorage(file, `${presetPath}.assignments: forbidden key '${agent}'`);
@@ -2033,17 +2052,24 @@ function validatePreset(raw, index, file) {
     const assignmentPath = `${presetPath}.assignments.${agent}`;
     if (!isRecord4(value)) throw invalidPresetStorage(file, `${assignmentPath} must be an object`);
     assertExactKeys(value, ASSIGNMENT_KEYS, assignmentPath, file);
-    if (typeof value.model !== "string" || value.model.length === 0) {
+    if (!Object.hasOwn(value, "model") || typeof value.model !== "string" || value.model.length === 0) {
       throw invalidPresetStorage(file, `${assignmentPath}.model must be a non-empty string`);
     }
-    if (Object.hasOwn(value, "variant") && typeof value.variant !== "string") {
-      throw invalidPresetStorage(file, `${assignmentPath}.variant must be a string`);
+    const assignment = { model: value.model };
+    if (Object.hasOwn(value, "variant") && value.variant !== void 0) {
+      if (typeof value.variant !== "string") {
+        throw invalidPresetStorage(file, `${assignmentPath}.variant must be a string`);
+      }
+      assignment.variant = value.variant;
+    } else {
+      Object.defineProperty(assignment, "variant", { configurable: true, value: void 0, writable: true });
     }
+    assignments[agent] = assignment;
   }
   return {
     name: raw.name,
     savedAt: raw.savedAt,
-    assignments: raw.assignments
+    assignments
   };
 }
 function assertExactKeys(value, expectedKeys, location, file) {
@@ -2585,9 +2611,9 @@ async function promptPresetName(api, state) {
 }
 function resolvePresetAssignments(current, changes, knownAgents) {
   const known = new Set(knownAgents);
-  const resolved = { ...current };
+  const resolved = Object.assign(/* @__PURE__ */ Object.create(null), current);
   for (const change of changes) resolved[change.agent] = change.after;
-  const assignments = {};
+  const assignments = /* @__PURE__ */ Object.create(null);
   for (const [agent, mapping] of Object.entries(resolved)) {
     if (!known.has(agent) || !mapping.model) continue;
     assignments[agent] = mapping.variant ? { model: mapping.model, variant: mapping.variant } : { model: mapping.model };
