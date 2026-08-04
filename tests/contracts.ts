@@ -1207,6 +1207,193 @@ async function shouldRoundTripAndOverwritePresetsWhenSaved(): Promise<void> {
   }
 }
 
+async function shouldRejectEveryInvalidPresetStorageShapeWhenLoaded(): Promise<void> {
+  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-presets-invalid."))
+  try {
+    // Given
+    const file = path.join(scratch, "model-configurator-presets.json")
+    const invalidCases: Array<{ name: string; content: string; reason: RegExp }> = [
+      { name: "malformed JSON", content: "{", reason: /malformed JSON/ },
+      { name: "non-object root", content: "[]", reason: /root must be an object/ },
+      { name: "unknown root field", content: '{"version":1,"presets":[],"extra":true}', reason: /unknown field 'extra'/ },
+      { name: "forbidden root key", content: '{"version":1,"presets":[],"__proto__":true}', reason: /forbidden key '__proto__'/ },
+      { name: "forbidden root prototype key", content: '{"version":1,"presets":[],"prototype":true}', reason: /forbidden key 'prototype'/ },
+      { name: "missing version", content: '{"presets":[]}', reason: /version is missing/ },
+      { name: "non-numeric version", content: '{"version":"1","presets":[]}', reason: /version must be numeric/ },
+      { name: "unsupported version", content: '{"version":2,"presets":[]}', reason: /unsupported version/ },
+      { name: "missing presets", content: '{"version":1}', reason: /presets is missing/ },
+      { name: "non-array presets", content: '{"version":1,"presets":{}}', reason: /presets must be an array/ },
+      {
+        name: "unknown preset field",
+        content: '{"version":1,"presets":[{"name":"a","savedAt":"now","assignments":{},"extra":true}]}',
+        reason: /presets\[0\].*unknown field 'extra'/,
+      },
+      {
+        name: "forbidden preset key",
+        content: '{"version":1,"presets":[{"name":"a","savedAt":"now","assignments":{},"constructor":true}]}',
+        reason: /forbidden key 'constructor'/,
+      },
+      { name: "non-object preset", content: '{"version":1,"presets":[null]}', reason: /presets\[0\] must be an object/ },
+      {
+        name: "empty preset name",
+        content: '{"version":1,"presets":[{"name":"","savedAt":"now","assignments":{}}]}',
+        reason: /presets\[0\]\.name must be a non-empty string/,
+      },
+      {
+        name: "non-string preset name",
+        content: '{"version":1,"presets":[{"name":7,"savedAt":"now","assignments":{}}]}',
+        reason: /presets\[0\]\.name must be a non-empty string/,
+      },
+      {
+        name: "missing preset name",
+        content: '{"version":1,"presets":[{"savedAt":"now","assignments":{}}]}',
+        reason: /presets\[0\]\.name must be a non-empty string/,
+      },
+      {
+        name: "non-string savedAt",
+        content: '{"version":1,"presets":[{"name":"a","savedAt":7,"assignments":{}}]}',
+        reason: /presets\[0\]\.savedAt must be a string/,
+      },
+      {
+        name: "missing savedAt",
+        content: '{"version":1,"presets":[{"name":"a","assignments":{}}]}',
+        reason: /presets\[0\]\.savedAt must be a string/,
+      },
+      {
+        name: "missing assignments",
+        content: '{"version":1,"presets":[{"name":"a","savedAt":"now"}]}',
+        reason: /presets\[0\]\.assignments is missing/,
+      },
+      {
+        name: "non-object assignments",
+        content: '{"version":1,"presets":[{"name":"a","savedAt":"now","assignments":[]}]}',
+        reason: /presets\[0\]\.assignments must be an object/,
+      },
+      {
+        name: "duplicate preset names",
+        content:
+          '{"version":1,"presets":[{"name":"a","savedAt":"one","assignments":{}},{"name":"a","savedAt":"two","assignments":{}}]}',
+        reason: /duplicate preset name 'a'/,
+      },
+      {
+        name: "non-object assignment",
+        content: '{"version":1,"presets":[{"name":"a","savedAt":"now","assignments":{"alpha":null}}]}',
+        reason: /presets\[0\]\.assignments\.alpha must be an object/,
+      },
+      {
+        name: "missing assignment model",
+        content: '{"version":1,"presets":[{"name":"a","savedAt":"now","assignments":{"alpha":{}}}]}',
+        reason: /presets\[0\]\.assignments\.alpha\.model must be a non-empty string/,
+      },
+      {
+        name: "empty assignment model",
+        content: '{"version":1,"presets":[{"name":"a","savedAt":"now","assignments":{"alpha":{"model":""}}}]}',
+        reason: /presets\[0\]\.assignments\.alpha\.model must be a non-empty string/,
+      },
+      {
+        name: "non-string assignment model",
+        content: '{"version":1,"presets":[{"name":"a","savedAt":"now","assignments":{"alpha":{"model":7}}}]}',
+        reason: /presets\[0\]\.assignments\.alpha\.model must be a non-empty string/,
+      },
+      {
+        name: "non-string assignment variant",
+        content: '{"version":1,"presets":[{"name":"a","savedAt":"now","assignments":{"alpha":{"model":"m","variant":7}}}]}',
+        reason: /presets\[0\].*variant must be a string/,
+      },
+      {
+        name: "unknown assignment field",
+        content: '{"version":1,"presets":[{"name":"a","savedAt":"now","assignments":{"alpha":{"model":"m","extra":true}}}]}',
+        reason: /unknown field 'extra'/,
+      },
+      {
+        name: "forbidden assignment key",
+        content: '{"version":1,"presets":[{"name":"a","savedAt":"now","assignments":{"__proto__":{"model":"m"}}}]}',
+        reason: /forbidden key '__proto__'/,
+      },
+      {
+        name: "forbidden assignment prototype key",
+        content: '{"version":1,"presets":[{"name":"a","savedAt":"now","assignments":{"prototype":{"model":"m"}}}]}',
+        reason: /forbidden key 'prototype'/,
+      },
+      {
+        name: "mixed valid and invalid presets",
+        content:
+          '{"version":1,"presets":[{"name":"valid","savedAt":"now","assignments":{}},{"name":"","savedAt":"now","assignments":{}}]}',
+        reason: /presets\[1\]\.name must be a non-empty string/,
+      },
+    ]
+
+    for (const invalidCase of invalidCases) {
+      // When
+      await writeFile(file, invalidCase.content)
+
+      // Then
+      await assert.rejects(
+        () => loadPresets(file),
+        (error: unknown) => {
+          assert.ok(error instanceof Error, `${invalidCase.name} did not reject with an Error`)
+          assert.ok(error.message.includes(file), `${invalidCase.name} omitted the preset file path`)
+          assert.match(error.message, invalidCase.reason, invalidCase.name)
+          return true
+        },
+      )
+    }
+    pass("shouldRejectEveryInvalidPresetStorageShapeWhenLoaded")
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+}
+
+async function shouldLoadOnlyMissingPresetStorageAsEmptyWhenReadFailsOtherwise(): Promise<void> {
+  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-presets-read."))
+  try {
+    // Given
+    const missingFile = path.join(scratch, "missing.json")
+    const directory = path.join(scratch, "directory")
+    await mkdir(directory)
+
+    // When
+    const missing = await loadPresets(missingFile)
+
+    // Then
+    assert.deepEqual(missing, [])
+    await assert.rejects(
+      () => loadPresets(directory),
+      (error: unknown) => {
+        assert.ok(error instanceof Error)
+        assert.ok(error.message.includes(directory))
+        assert.match(error.message, /unable to read|read failed/i)
+        return true
+      },
+    )
+    pass("shouldLoadOnlyMissingPresetStorageAsEmptyWhenReadFailsOtherwise")
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+}
+
+async function shouldReturnEveryValidPresetSortedWithoutNormalization(): Promise<void> {
+  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-presets-valid."))
+  try {
+    // Given
+    const file = path.join(scratch, "model-configurator-presets.json")
+    const expected = [
+      { name: "a", savedAt: "", assignments: { beta: { model: "m", variant: "" } } },
+      { name: "z", savedAt: "  saved exactly  ", assignments: { alpha: { model: " model exactly " } } },
+    ]
+    await writeJson(file, { version: 1, presets: [expected[1], expected[0]] })
+
+    // When
+    const actual = await loadPresets(file)
+
+    // Then
+    assert.deepEqual(actual, expected)
+    pass("shouldReturnEveryValidPresetSortedWithoutNormalization")
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+}
+
 async function shouldOverwritePresetWhenSavingUnderExistingName(): Promise<void> {
   const scratch = await createWizardFixture()
   try {
@@ -2080,6 +2267,9 @@ await shouldRepeatSubagentUnderEveryParentThatClaimsIt()
 await shouldExcludeInternalAgentsUntilTheyAreRevealed()
 await shouldMatchAnchoredGlobsWhenEvaluatingPermissionPatterns()
 await shouldRoundTripAndOverwritePresetsWhenSaved()
+await shouldRejectEveryInvalidPresetStorageShapeWhenLoaded()
+await shouldLoadOnlyMissingPresetStorageAsEmptyWhenReadFailsOtherwise()
+await shouldReturnEveryValidPresetSortedWithoutNormalization()
 await shouldOverwritePresetWhenSavingUnderExistingName()
 await shouldToastAndRepromptWhenPresetNameIsEmpty()
 await shouldGroupReviewChangesByParentAgent()
