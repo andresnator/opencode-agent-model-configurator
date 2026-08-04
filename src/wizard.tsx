@@ -76,6 +76,7 @@ type WizardState = {
   agents: LiveAgent[]
   profiles: ProfileFile[]
   presets: StoredPreset[]
+  presetStorageAvailable: boolean
   models: ModelOption[]
   presetsPath: string
   showHidden: boolean
@@ -118,7 +119,17 @@ export async function runModelConfigurator(api: TuiPluginApi, profilesRoot: stri
       api.ui.toast({ variant: "warning", message: `Skipped profile ${entry.path}: ${entry.errors.join("; ")}` })
     }
     const presetsPath = presetsFile(api.state.path)
-    const presets = await loadPresets(presetsPath)
+    let presets: StoredPreset[] = []
+    let presetStorageAvailable = true
+    try {
+      presets = await loadPresets(presetsPath)
+    } catch (error) {
+      presetStorageAvailable = false
+      api.ui.toast({
+        variant: "warning",
+        message: `Preset storage unavailable at ${presetsPath}: ${errorMessage(error)} Repair the file and reopen the configurator.`,
+      })
+    }
 
     const catalog = await loadCatalog(api)
     if (catalog.length === 0) {
@@ -127,7 +138,7 @@ export async function runModelConfigurator(api: TuiPluginApi, profilesRoot: stri
     }
     const models = flattenModels(catalog)
 
-    const state: WizardState = { agents, profiles, presets, models, presetsPath, showHidden: false }
+    const state: WizardState = { agents, profiles, presets, presetStorageAvailable, models, presetsPath, showHidden: false }
     await runSteps(api, state)
   } catch (error) {
     api.ui.toast({ variant: "error", title: "Model configurator failed", message: errorMessage(error), duration: 8000 })
@@ -532,7 +543,12 @@ async function runReviewStep(api: TuiPluginApi, state: WizardState): Promise<Ste
     title,
     [
       { title: "Apply", value: APPLY, description: warning || undefined },
-      { title: "Apply and save as preset", value: APPLY_SAVE },
+      {
+        title: "Apply and save as preset",
+        value: APPLY_SAVE,
+        description: state.presetStorageAvailable ? undefined : "Repair preset storage and reopen the configurator to enable saving.",
+        disabled: !state.presetStorageAvailable,
+      },
       { title: "Cancel", value: CANCEL },
       ...rows.map((change) => ({
         title: change.agent,
@@ -547,6 +563,7 @@ async function runReviewStep(api: TuiPluginApi, state: WizardState): Promise<Ste
   if (!choice) return "back"
   if (choice === CANCEL) return "done"
   if (choice !== APPLY && choice !== APPLY_SAVE) return "back"
+  if (choice === APPLY_SAVE && !state.presetStorageAvailable) return "back"
 
   let presetName: string | undefined
   if (choice === APPLY_SAVE) {

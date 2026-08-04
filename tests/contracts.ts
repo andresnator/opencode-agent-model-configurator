@@ -1,4 +1,5 @@
 import assert from "node:assert/strict"
+import { writeFileSync } from "node:fs"
 import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises"
 import { homedir, tmpdir } from "node:os"
 import path from "node:path"
@@ -330,6 +331,206 @@ async function shouldCompleteStagedWizardAndPersistSelectedChanges(): Promise<vo
     assert.equal(toasts.at(-1)?.variant, "success")
     assert.equal((await readdir(path.dirname(configFile))).some((entry) => entry.includes(".bak")), false)
     pass("shouldCompleteStagedWizardAndPersistSelectedChanges")
+  } finally {
+    await rm(scratch.root, { recursive: true, force: true })
+  }
+}
+
+async function shouldKeepCoreConfigurationUsableWhenPresetStorageIsUnavailable(): Promise<void> {
+  const scratch = await createWizardFixture()
+  try {
+    // Given invalid preset storage and a normal configuration flow
+    const presetsPath = path.join(scratch.global, "model-configurator-presets.json")
+    await mkdir(scratch.global, { recursive: true })
+    await writeFile(presetsPath, "not json\n")
+    const configFile = path.join(scratch.project, ".opencode", "opencode.jsonc")
+    const toasts: TuiToast[] = []
+    let hubOptions: PolicyOption[] = []
+    let reviewOptions: PolicyOption[] = []
+    const api = createFakeApi(scratch, toasts, {
+      select(title, options) {
+        if (title === "Configuration scope") return option(options, "project")
+        if (title === "Agents") {
+          hubOptions = options
+          return option(options, "default")
+        }
+        if (title === "Tier: high") return option(options, "openai/new")
+        if (title === "Variant for openai/new") return option(options, "high")
+        if (title === "Tier: low") return option(options, "__keep_current__")
+        if (title === "Individual overrides") return option(options, "__override_no__")
+        if (title.startsWith("Apply ")) {
+          reviewOptions = options
+          return option(options, "__apply__")
+        }
+        throw new Error(`unexpected select dialog: ${title}`)
+      },
+      confirm() {
+        return true
+      },
+    })
+
+    // When the wizard opens and the ordinary apply flow completes
+    await runModelConfigurator(api, scratch.profiles)
+
+    // Then preset storage is hidden and saving is disabled without blocking core configuration
+    assert.equal(hubOptions.some((candidate) => candidate.category === "Saved presets"), false)
+    const saveOption = reviewOptions.find((candidate) => candidate.value === "__apply_save__")
+    assert.ok(saveOption)
+    assert.equal(saveOption.disabled, true)
+    assert.match(saveOption.description ?? "", /repair.*reopen|reopen.*repair/i)
+    const warnings = toasts.filter((toast) => toast.variant === "warning")
+    assert.equal(warnings.length, 1)
+    assert.match(String(warnings[0]?.message), new RegExp(`${escapeRegExp(presetsPath)}.*malformed JSON`))
+    assert.deepEqual((await readConfigSnapshot(configFile)).mappings, {
+      alpha: { model: "openai/new", variant: "high" },
+      beta: { model: "anthropic/old", variant: undefined },
+    })
+    pass("shouldKeepCoreConfigurationUsableWhenPresetStorageIsUnavailable")
+  } finally {
+    await rm(scratch.root, { recursive: true, force: true })
+  }
+}
+
+async function shouldKeepCoreConfigurationUsableWhenPresetStorageIsUnreadable(): Promise<void> {
+  const scratch = await createWizardFixture()
+  try {
+    // Given unreadable preset storage and a normal configuration flow
+    const presetsPath = path.join(scratch.global, "model-configurator-presets.json")
+    await mkdir(scratch.global, { recursive: true })
+    await mkdir(presetsPath)
+    const configFile = path.join(scratch.project, ".opencode", "opencode.jsonc")
+    const toasts: TuiToast[] = []
+    let hubOptions: PolicyOption[] = []
+    let reviewOptions: PolicyOption[] = []
+    const api = createFakeApi(scratch, toasts, {
+      select(title, options) {
+        if (title === "Configuration scope") return option(options, "project")
+        if (title === "Agents") {
+          hubOptions = options
+          return option(options, "default")
+        }
+        if (title === "Tier: high") return option(options, "openai/new")
+        if (title === "Variant for openai/new") return option(options, "high")
+        if (title === "Tier: low") return option(options, "__keep_current__")
+        if (title === "Individual overrides") return option(options, "__override_no__")
+        if (title.startsWith("Apply ")) {
+          reviewOptions = options
+          return option(options, "__apply__")
+        }
+        throw new Error(`unexpected select dialog: ${title}`)
+      },
+      confirm() {
+        return true
+      },
+    })
+
+    // When the wizard opens and the ordinary apply flow completes
+    await runModelConfigurator(api, scratch.profiles)
+
+    // Then unreadable preset storage is contained without blocking core configuration
+    assert.equal(hubOptions.some((candidate) => candidate.category === "Saved presets"), false)
+    const saveOption = reviewOptions.find((candidate) => candidate.value === "__apply_save__")
+    assert.ok(saveOption)
+    assert.equal(saveOption.disabled, true)
+    assert.match(saveOption.description ?? "", /repair.*reopen|reopen.*repair/i)
+    const warnings = toasts.filter((toast) => toast.variant === "warning")
+    assert.equal(warnings.length, 1)
+    assert.match(String(warnings[0]?.message), new RegExp(escapeRegExp(presetsPath)))
+    assert.match(String(warnings[0]?.message), /Unable to read preset storage/)
+    assert.match(String(warnings[0]?.message), /EISDIR|directory/i)
+    assert.deepEqual((await readConfigSnapshot(configFile)).mappings, {
+      alpha: { model: "openai/new", variant: "high" },
+      beta: { model: "anthropic/old", variant: undefined },
+    })
+    pass("shouldKeepCoreConfigurationUsableWhenPresetStorageIsUnreadable")
+  } finally {
+    await rm(scratch.root, { recursive: true, force: true })
+  }
+}
+
+async function shouldRestorePresetStorageWhenWizardReopensAfterRepair(): Promise<void> {
+  const scratch = await createWizardFixture()
+  try {
+    // Given invalid storage repaired after startup, while the first wizard session remains open
+    const presetsPath = path.join(scratch.global, "model-configurator-presets.json")
+    await mkdir(scratch.global, { recursive: true })
+    await writeFile(presetsPath, "not json\n")
+    const repaired = { name: "repaired", savedAt: "2026-01-01T00:00:00.000Z", assignments: { alpha: { model: "anthropic/old" } } }
+    const firstSession: { hubOptions: PolicyOption[]; reviewOptions: PolicyOption[] } = { hubOptions: [], reviewOptions: [] }
+    let repairOnScope = true
+    const firstApi = createFakeApi(scratch, [], {
+      select(title, options) {
+        if (title === "Configuration scope") {
+          if (repairOnScope) {
+            writeFileSync(presetsPath, `${JSON.stringify({ version: 1, presets: [repaired] })}\n`)
+            repairOnScope = false
+          }
+          return option(options, "project")
+        }
+        if (title === "Agents") {
+          firstSession.hubOptions = options
+          return option(options, "default")
+        }
+        if (title === "Tier: high") return option(options, "openai/new")
+        if (title === "Variant for openai/new") return option(options, "high")
+        if (title === "Tier: low") return option(options, "__keep_current__")
+        if (title === "Individual overrides") return option(options, "__override_no__")
+        if (title.startsWith("Apply ")) {
+          firstSession.reviewOptions = options
+          return option(options, "__apply__")
+        }
+        throw new Error(`unexpected select dialog: ${title}`)
+      },
+      confirm() {
+        return true
+      },
+    })
+
+    // When the first session completes after the file is repaired
+    await runModelConfigurator(firstApi, scratch.profiles)
+
+    // Then the session-sticky gate keeps entries and mutation UI unavailable
+    assert.equal(firstSession.hubOptions.some((candidate) => candidate.category === "Saved presets"), false)
+    assert.equal(firstSession.reviewOptions.find((candidate) => candidate.value === "__apply_save__")?.disabled, true)
+
+    // When the configurator is reopened against the repaired v1 file
+    const secondSession: { sawPreset: boolean; sawEnabledSave: boolean } = { sawPreset: false, sawEnabledSave: false }
+    const secondApi = createFakeApi(scratch, [], {
+      select(title, options) {
+        if (title === "Configuration scope") return option(options, "project")
+        if (title === "Agents") {
+          secondSession.sawPreset = options.some((candidate) => candidate.value === "__preset__:repaired")
+          return option(options, "__preset__:repaired")
+        }
+        if (title === "Preset: repaired") return option(options, "__apply_preset__")
+        if (title.startsWith("Apply ")) {
+          secondSession.sawEnabledSave = options.some((candidate) => candidate.value === "__apply_save__" && !candidate.disabled)
+          return option(options, "__apply_save__")
+        }
+        throw new Error(`unexpected select dialog: ${title}`)
+      },
+      confirm() {
+        return true
+      },
+      prompt(title) {
+        if (title === "Preset name") return "reopened"
+        throw new Error(`unexpected prompt dialog: ${title}`)
+      },
+    })
+    await runModelConfigurator(secondApi, scratch.profiles)
+
+    // Then reopening restores preset entries and mutation behavior
+    assert.equal(secondSession.sawPreset, true)
+    assert.equal(secondSession.sawEnabledSave, true)
+    const persistedPresets = await loadPresets(presetsPath)
+    assert.deepEqual(persistedPresets[0]?.assignments, { alpha: { model: "anthropic/old" }, beta: { model: "anthropic/old" } })
+    assert.equal(persistedPresets[0]?.name, "reopened")
+    assert.deepEqual(persistedPresets[1], repaired)
+    assert.deepEqual((await readConfigSnapshot(path.join(scratch.project, ".opencode", "opencode.jsonc"))).mappings, {
+      alpha: { model: "anthropic/old", variant: undefined },
+      beta: { model: "anthropic/old", variant: undefined },
+    })
+    pass("shouldRestorePresetStorageWhenWizardReopensAfterRepair")
   } finally {
     await rm(scratch.root, { recursive: true, force: true })
   }
@@ -2194,7 +2395,7 @@ type WizardFixture = {
   agents: FixtureAgent[]
 }
 
-type PolicyOption = { title: string; value: string }
+type PolicyOption = { title: string; value: string; description?: string; category?: string; disabled?: boolean }
 
 type DialogPolicy = {
   select: (title: string, options: Array<PolicyOption>) => PolicyOption | "escape"
@@ -2355,6 +2556,10 @@ async function writeJsonc(file: string, content: string): Promise<void> {
   await writeFile(file, content)
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+}
+
 function fixtureChanges(): AgentChange[] {
   return [
     {
@@ -2396,6 +2601,9 @@ await shouldWriteWithoutBackupAndPreserveModeWhenWriteSucceeds()
 await shouldRejectConcurrentEditBeforeWriting()
 await shouldRestoreOriginalWhenInjectedPersistenceStepFails()
 await shouldCompleteStagedWizardAndPersistSelectedChanges()
+await shouldKeepCoreConfigurationUsableWhenPresetStorageIsUnavailable()
+await shouldKeepCoreConfigurationUsableWhenPresetStorageIsUnreadable()
+await shouldRestorePresetStorageWhenWizardReopensAfterRepair()
 await shouldLeaveConfigUntouchedWhenFinalReviewIsCancelled()
 await shouldReshowPreviousDialogWhenEscapingBack()
 await shouldExitWithoutWritingWhenScopeIsEscaped()
