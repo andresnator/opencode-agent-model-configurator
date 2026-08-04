@@ -1912,6 +1912,10 @@ import path3 from "node:path";
 var PRESETS_FILE = "model-configurator-presets.json";
 var PRESETS_VERSION = 1;
 var DEFAULT_FILE_MODE2 = 384;
+var PRESET_DOCUMENT_KEYS = ["version", "presets"];
+var PRESET_KEYS = ["name", "savedAt", "assignments"];
+var ASSIGNMENT_KEYS = ["model", "variant"];
+var FORBIDDEN_KEYS = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
 function presetsFile(runtime) {
   return path3.join(globalConfigRoot(runtime), PRESETS_FILE);
 }
@@ -1921,19 +1925,32 @@ async function loadPresets(file) {
     content = await readFile3(file, "utf8");
   } catch (error) {
     if (isMissing2(error)) return [];
-    throw error;
+    throw unreadablePresetStorage(file, error);
   }
   let parsed;
   try {
     parsed = JSON.parse(content);
   } catch {
-    return [];
+    throw invalidPresetStorage(file, "malformed JSON");
   }
-  const rawPresets = isRecord4(parsed) && Array.isArray(parsed.presets) ? parsed.presets : [];
+  if (!isRecord4(parsed)) throw invalidPresetStorage(file, "root must be an object");
+  assertExactKeys(parsed, PRESET_DOCUMENT_KEYS, "root", file);
+  if (!Object.hasOwn(parsed, "version")) throw invalidPresetStorage(file, "version is missing");
+  if (typeof parsed.version !== "number") throw invalidPresetStorage(file, "version must be numeric");
+  if (parsed.version !== PRESETS_VERSION) {
+    throw invalidPresetStorage(file, `unsupported version ${String(parsed.version)}`);
+  }
+  if (!Object.hasOwn(parsed, "presets")) throw invalidPresetStorage(file, "presets is missing");
+  if (!Array.isArray(parsed.presets)) throw invalidPresetStorage(file, "presets must be an array");
   const presets = [];
-  for (const raw of rawPresets) {
-    const preset = normalizePreset(raw);
-    if (preset) presets.push(preset);
+  const names = /* @__PURE__ */ new Set();
+  for (const [index, raw] of parsed.presets.entries()) {
+    const preset = validatePreset(raw, index, file);
+    if (names.has(preset.name)) {
+      throw invalidPresetStorage(file, `duplicate preset name '${preset.name}' at presets[${index}].name`);
+    }
+    names.add(preset.name);
+    presets.push(preset);
   }
   return presets.sort((left, right) => left.name.localeCompare(right.name));
 }
@@ -1994,19 +2011,53 @@ async function syncDirectory2(directory) {
     await handle.close();
   }
 }
-function normalizePreset(raw) {
-  if (!isRecord4(raw) || typeof raw.name !== "string" || raw.name.length === 0) return void 0;
-  const assignments = {};
-  if (isRecord4(raw.assignments)) {
-    for (const [agent, value] of Object.entries(raw.assignments)) {
-      if (agent === "__proto__" || agent === "constructor" || agent === "prototype") continue;
-      if (!isRecord4(value) || typeof value.model !== "string") continue;
-      const assignment = { model: value.model };
-      if (typeof value.variant === "string") assignment.variant = value.variant;
-      assignments[agent] = assignment;
+function validatePreset(raw, index, file) {
+  const presetPath = `presets[${index}]`;
+  if (!isRecord4(raw)) throw invalidPresetStorage(file, `${presetPath} must be an object`);
+  assertExactKeys(raw, PRESET_KEYS, presetPath, file);
+  if (typeof raw.name !== "string" || raw.name.length === 0) {
+    throw invalidPresetStorage(file, `${presetPath}.name must be a non-empty string`);
+  }
+  if (typeof raw.savedAt !== "string") throw invalidPresetStorage(file, `${presetPath}.savedAt must be a string`);
+  if (!Object.hasOwn(raw, "assignments")) {
+    throw invalidPresetStorage(file, `${presetPath}.assignments is missing`);
+  }
+  if (!isRecord4(raw.assignments)) {
+    throw invalidPresetStorage(file, `${presetPath}.assignments must be an object`);
+  }
+  for (const agent of Object.keys(raw.assignments)) {
+    if (FORBIDDEN_KEYS.has(agent)) {
+      throw invalidPresetStorage(file, `${presetPath}.assignments: forbidden key '${agent}'`);
+    }
+    const value = raw.assignments[agent];
+    const assignmentPath = `${presetPath}.assignments.${agent}`;
+    if (!isRecord4(value)) throw invalidPresetStorage(file, `${assignmentPath} must be an object`);
+    assertExactKeys(value, ASSIGNMENT_KEYS, assignmentPath, file);
+    if (typeof value.model !== "string" || value.model.length === 0) {
+      throw invalidPresetStorage(file, `${assignmentPath}.model must be a non-empty string`);
+    }
+    if (Object.hasOwn(value, "variant") && typeof value.variant !== "string") {
+      throw invalidPresetStorage(file, `${assignmentPath}.variant must be a string`);
     }
   }
-  return { name: raw.name, savedAt: typeof raw.savedAt === "string" ? raw.savedAt : "", assignments };
+  return {
+    name: raw.name,
+    savedAt: raw.savedAt,
+    assignments: raw.assignments
+  };
+}
+function assertExactKeys(value, expectedKeys, location, file) {
+  for (const key of Object.keys(value)) {
+    if (FORBIDDEN_KEYS.has(key)) throw invalidPresetStorage(file, `${location}: forbidden key '${key}'`);
+    if (!expectedKeys.includes(key)) throw invalidPresetStorage(file, `${location}: unknown field '${key}'`);
+  }
+}
+function invalidPresetStorage(file, reason) {
+  throw new Error(`Invalid preset storage at ${file}: ${reason}`);
+}
+function unreadablePresetStorage(file, error) {
+  const reason = error instanceof Error ? error.message : String(error);
+  return new Error(`Unable to read preset storage at ${file}: ${reason}`);
 }
 function timestamp2() {
   return (/* @__PURE__ */ new Date()).toISOString().replace(/[-:TZ.]/g, "").slice(0, 14);
@@ -2069,14 +2120,24 @@ async function runModelConfigurator(api, profilesRoot) {
       api.ui.toast({ variant: "warning", message: `Skipped profile ${entry.path}: ${entry.errors.join("; ")}` });
     }
     const presetsPath = presetsFile(api.state.path);
-    const presets = await loadPresets(presetsPath);
+    let presets = [];
+    let presetStorageAvailable = true;
+    try {
+      presets = await loadPresets(presetsPath);
+    } catch (error) {
+      presetStorageAvailable = false;
+      api.ui.toast({
+        variant: "warning",
+        message: `Preset storage unavailable at ${presetsPath}: ${errorMessage(error)} Repair the file and reopen the configurator.`
+      });
+    }
     const catalog = await loadCatalog(api);
     if (catalog.length === 0) {
       api.ui.toast({ variant: "warning", message: "No connected providers with models are available. Connect one and retry." });
       return;
     }
     const models = flattenModels(catalog);
-    const state = { agents, profiles, presets, models, presetsPath, showHidden: false };
+    const state = { agents, profiles, presets, presetStorageAvailable, models, presetsPath, showHidden: false };
     await runSteps(api, state);
   } catch (error) {
     api.ui.toast({ variant: "error", title: "Model configurator failed", message: errorMessage(error), duration: 8e3 });
@@ -2287,7 +2348,14 @@ async function handlePresetChoice(api, state, preset) {
   );
   if (!action) return "reshow";
   if (action === DELETE_PRESET) {
-    await deletePreset(state.presetsPath, preset.name);
+    try {
+      await deletePreset(state.presetsPath, preset.name);
+    } catch (error) {
+      state.presets = [];
+      state.presetStorageAvailable = false;
+      api.ui.toast({ variant: "error", title: "Preset not deleted", message: errorMessage(error), duration: 8e3 });
+      return "reshow";
+    }
     state.presets = state.presets.filter((entry) => entry.name !== preset.name);
     api.ui.toast({ variant: "success", message: `Deleted preset "${preset.name}".` });
     return "reshow";
@@ -2446,7 +2514,12 @@ async function runReviewStep(api, state) {
     title,
     [
       { title: "Apply", value: APPLY, description: warning || void 0 },
-      { title: "Apply and save as preset", value: APPLY_SAVE },
+      {
+        title: "Apply and save as preset",
+        value: APPLY_SAVE,
+        description: state.presetStorageAvailable ? void 0 : "Repair preset storage and reopen the configurator to enable saving.",
+        disabled: !state.presetStorageAvailable
+      },
       { title: "Cancel", value: CANCEL },
       ...rows.map((change) => ({
         title: change.agent,
@@ -2461,6 +2534,7 @@ async function runReviewStep(api, state) {
   if (!choice) return "back";
   if (choice === CANCEL) return "done";
   if (choice !== APPLY && choice !== APPLY_SAVE) return "back";
+  if (choice === APPLY_SAVE && !state.presetStorageAvailable) return "back";
   let presetName;
   if (choice === APPLY_SAVE) {
     presetName = await promptPresetName(api, state);
@@ -2479,6 +2553,7 @@ async function runReviewStep(api, state) {
       await savePreset(state.presetsPath, { name: presetName, savedAt: (/* @__PURE__ */ new Date()).toISOString(), assignments });
       api.ui.toast({ variant: "success", message: `Saved preset "${presetName}".` });
     } catch (error) {
+      state.presetStorageAvailable = false;
       api.ui.toast({ variant: "error", title: "Preset not saved", message: errorMessage(error), duration: 8e3 });
     }
   }
