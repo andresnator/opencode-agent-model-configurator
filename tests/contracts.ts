@@ -54,6 +54,7 @@ const EXPECTED_FAILURE_STEPS: PersistenceStep[] = [
   "destination-flush",
   "post-validate",
 ]
+const CORRUPTED_PRESET_BYTES = "not valid preset storage after startup\n"
 
 let passes = 0
 
@@ -777,6 +778,129 @@ async function shouldDeletePresetWithoutTouchingConfig(): Promise<void> {
     assert.equal(await readFile(configFile, "utf8"), original)
     assert.ok(toasts.some((toast) => toast.message?.includes('Deleted preset "saved"')))
     pass("shouldDeletePresetWithoutTouchingConfig")
+  } finally {
+    await rm(scratch.root, { recursive: true, force: true })
+  }
+}
+
+async function shouldKeepCoreApplyAndReportPresetSaveFailureWhenStorageBecomesInvalid(): Promise<void> {
+  const scratch = await createWizardFixture()
+  try {
+    // Given valid preset storage loaded at startup
+    const configFile = path.join(scratch.project, ".opencode", "opencode.jsonc")
+    const presetsPath = path.join(scratch.global, "model-configurator-presets.json")
+    await savePreset(presetsPath, {
+      name: "existing",
+      savedAt: "2026-01-01T00:00:00.000Z",
+      assignments: { alpha: { model: "anthropic/old" } },
+    })
+    const toasts: TuiToast[] = []
+    const api = createFakeApi(scratch, toasts, {
+      select(title, options) {
+        if (title === "Configuration scope") return option(options, "project")
+        if (title === "Agents") return option(options, "default")
+        if (title === "Tier: high") return option(options, "openai/new")
+        if (title === "Variant for openai/new") return option(options, "high")
+        if (title === "Tier: low") return option(options, "__keep_current__")
+        if (title === "Individual overrides") return option(options, "__override_no__")
+        if (title.startsWith("Apply ")) {
+          writeFileSync(presetsPath, CORRUPTED_PRESET_BYTES)
+          return option(options, "__apply_save__")
+        }
+        throw new Error(`unexpected select dialog: ${title}`)
+      },
+      confirm() {
+        return true
+      },
+      prompt(title) {
+        if (title === "Preset name") return "after-corruption"
+        throw new Error(`unexpected prompt dialog: ${title}`)
+      },
+    })
+
+    // When Apply-and-save runs after storage is corrupted
+    await runModelConfigurator(api, scratch.profiles)
+
+    // Then core Apply succeeds, while the local preset mutation reports only its failure
+    const errors = toasts.filter((toast) => toast.variant === "error")
+    assert.equal(errors.length, 1)
+    assert.equal(errors[0]?.title, "Preset not saved")
+    assert.match(errors[0]?.message ?? "", /Invalid preset storage/)
+    assert.equal(toasts.some((toast) => toast.message?.includes('Saved preset "')), false)
+    assert.equal(toasts.some((toast) => toast.title === "Model configurator failed"), false)
+    assert.deepEqual((await readConfigSnapshot(configFile)).mappings, {
+      alpha: { model: "openai/new", variant: "high" },
+      beta: { model: "anthropic/old", variant: undefined },
+    })
+    assert.deepEqual(await readFile(presetsPath), Buffer.from(CORRUPTED_PRESET_BYTES))
+    pass("shouldKeepCoreApplyAndReportPresetSaveFailureWhenStorageBecomesInvalid")
+  } finally {
+    await rm(scratch.root, { recursive: true, force: true })
+  }
+}
+
+async function shouldClearPresetUiAndReportDeleteFailureWhenStorageBecomesInvalid(): Promise<void> {
+  const scratch = await createWizardFixture()
+  try {
+    // Given valid preset storage loaded at startup
+    const configFile = path.join(scratch.project, ".opencode", "opencode.jsonc")
+    const presetsPath = path.join(scratch.global, "model-configurator-presets.json")
+    await savePreset(presetsPath, {
+      name: "saved",
+      savedAt: "2026-01-01T00:00:00.000Z",
+      assignments: { alpha: { model: "openai/new", variant: "high" } },
+    })
+    const toasts: TuiToast[] = []
+    let hubVisits = 0
+    let postDeleteHubOptions: PolicyOption[] = []
+    let reviewOptions: PolicyOption[] = []
+    const api = createFakeApi(scratch, toasts, {
+      select(title, options) {
+        if (title === "Configuration scope") return option(options, "project")
+        if (title === "Agents") {
+          hubVisits += 1
+          if (hubVisits === 1) return option(options, "__preset__:saved")
+          postDeleteHubOptions = options
+          return option(options, "default")
+        }
+        if (title === "Preset: saved") {
+          writeFileSync(presetsPath, CORRUPTED_PRESET_BYTES)
+          return option(options, "__delete_preset__")
+        }
+        if (title === "Tier: high") return option(options, "openai/new")
+        if (title === "Variant for openai/new") return option(options, "high")
+        if (title === "Tier: low") return option(options, "__keep_current__")
+        if (title === "Individual overrides") return option(options, "__override_no__")
+        if (title.startsWith("Apply ")) {
+          reviewOptions = options
+          return option(options, "__apply__")
+        }
+        throw new Error(`unexpected select dialog: ${title}`)
+      },
+      confirm() {
+        return true
+      },
+    })
+
+    // When delete runs after storage is corrupted, then the user returns to the hub
+    await runModelConfigurator(api, scratch.profiles)
+
+    // Then the local error clears entries, preserves bytes, and gates later mutations
+    const errors = toasts.filter((toast) => toast.variant === "error")
+    assert.equal(errors.length, 1)
+    assert.equal(errors[0]?.title, "Preset not deleted")
+    assert.match(errors[0]?.message ?? "", /Invalid preset storage/)
+    assert.equal(toasts.some((toast) => toast.message?.includes('Deleted preset "')), false)
+    assert.equal(postDeleteHubOptions.some((candidate) => candidate.category === "Saved presets"), false)
+    const saveOption = reviewOptions.find((candidate) => candidate.value === "__apply_save__")
+    assert.ok(saveOption)
+    assert.equal(saveOption.disabled, true)
+    assert.deepEqual(await readFile(presetsPath), Buffer.from(CORRUPTED_PRESET_BYTES))
+    assert.deepEqual((await readConfigSnapshot(configFile)).mappings, {
+      alpha: { model: "openai/new", variant: "high" },
+      beta: { model: "anthropic/old", variant: undefined },
+    })
+    pass("shouldClearPresetUiAndReportDeleteFailureWhenStorageBecomesInvalid")
   } finally {
     await rm(scratch.root, { recursive: true, force: true })
   }
@@ -2610,6 +2734,8 @@ await shouldExitWithoutWritingWhenScopeIsEscaped()
 await shouldSavePresetWhenApplyingAndSaving()
 await shouldApplyPresetSkippingTiersAndOverrides()
 await shouldDeletePresetWithoutTouchingConfig()
+await shouldKeepCoreApplyAndReportPresetSaveFailureWhenStorageBecomesInvalid()
+await shouldClearPresetUiAndReportDeleteFailureWhenStorageBecomesInvalid()
 await shouldOpenAdjacentAgentViaNextAgent()
 await shouldPreserveOverridesWhenEscapingAgentChooser()
 await shouldConfigureAgentThroughGroupBrowseAndApply()

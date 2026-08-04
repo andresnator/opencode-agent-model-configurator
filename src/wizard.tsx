@@ -368,7 +368,14 @@ async function handlePresetChoice(api: TuiPluginApi, state: WizardState, preset:
   if (!action) return "reshow"
 
   if (action === DELETE_PRESET) {
-    await deletePreset(state.presetsPath, preset.name)
+    try {
+      await deletePreset(state.presetsPath, preset.name)
+    } catch (error) {
+      state.presets = []
+      state.presetStorageAvailable = false
+      api.ui.toast({ variant: "error", title: "Preset not deleted", message: errorMessage(error), duration: 8000 })
+      return "reshow"
+    }
     state.presets = state.presets.filter((entry) => entry.name !== preset.name)
     api.ui.toast({ variant: "success", message: `Deleted preset "${preset.name}".` })
     return "reshow"
@@ -587,6 +594,7 @@ async function runReviewStep(api: TuiPluginApi, state: WizardState): Promise<Ste
       await savePreset(state.presetsPath, { name: presetName, savedAt: new Date().toISOString(), assignments })
       api.ui.toast({ variant: "success", message: `Saved preset "${presetName}".` })
     } catch (error) {
+      state.presetStorageAvailable = false
       api.ui.toast({ variant: "error", title: "Preset not saved", message: errorMessage(error), duration: 8000 })
     }
   }
