@@ -6,15 +6,15 @@ The plugin discovers agents, connected providers, models, and variants live from
 
 ## Quick path
 
-The repository is usable directly from source while the npm package is prepared for its first publication:
+The repository is usable directly from a pinned GitHub release while the npm package is prepared for its first publication:
 
 ```bash
-git clone https://github.com/andresnator/opencode-agent-model-configurator.git
+git clone --branch v0.1.0 --depth 1 https://github.com/andresnator/opencode-agent-model-configurator.git
 cd opencode-agent-model-configurator
-npm ci
-npm run check
 opencode plugin "$PWD" --global
 ```
+
+Keep the cloned directory: OpenCode records its absolute path in `tui.json`. No `npm install` or build step is required because the release contains the verified self-contained bundle.
 
 Restart OpenCode, then open **Configure agent models** from `Ctrl+P` or run:
 
@@ -24,7 +24,7 @@ Restart OpenCode, then open **Configure agent models** from `Ctrl+P` or run:
 
 Use project scope to write `.opencode/opencode.json[c]`, or global scope to write the user OpenCode configuration.
 
-> The npm manifest is ready for `opencode plugin opencode-agent-model-configurator@<version> --global`, but the package is not claimed to be available until an npm release is published.
+> The npm manifest is ready for `opencode plugin opencode-agent-model-configurator@<version> --global`, but the package is not claimed to be available until an npm release is published. Direct `github:` and local `.tgz` specs are not documented as supported by OpenCode 1.18.10 and are intentionally not recommended here.
 
 ## What it does
 
