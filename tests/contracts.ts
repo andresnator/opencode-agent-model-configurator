@@ -1394,6 +1394,155 @@ async function shouldReturnEveryValidPresetSortedWithoutNormalization(): Promise
   }
 }
 
+async function shouldRejectSaveAndDeleteBeforeWritingWhenStorageBecomesInvalid(): Promise<void> {
+  const operations = [
+    {
+      name: "save",
+      run: (file: string) =>
+        savePreset(file, { name: "new", savedAt: "2026-01-03T00:00:00.000Z", assignments: { gamma: { model: "google/new" } } }),
+    },
+    {
+      name: "delete",
+      run: (file: string) => deletePreset(file, "existing"),
+    },
+  ]
+
+  for (const operation of operations) {
+    const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-presets-reject."))
+    try {
+      // Given valid storage that becomes invalid immediately before the mutation
+      const file = path.join(scratch, "model-configurator-presets.json")
+      await writeJson(file, {
+        version: 1,
+        presets: [{ name: "existing", savedAt: "2026-01-01T00:00:00.000Z", assignments: { alpha: { model: "openai/old" } } }],
+      })
+      const invalidBytes = Buffer.from('{"version":1,"presets":[{"name":"","savedAt":"now","assignments":{}}]}\n')
+      await writeFile(file, invalidBytes)
+      const bytesBeforeMutation = await readFile(file)
+      const entriesBeforeMutation = (await readdir(scratch)).sort()
+
+      // When
+      await assert.rejects(() => operation.run(file), (error: unknown) => {
+        assert.ok(error instanceof Error)
+        assert.ok(error.message.includes(file))
+        assert.match(error.message, /Invalid preset storage/)
+        return true
+      })
+
+      // Then the invalid bytes and directory contents remain byte-for-byte unchanged
+      assert.deepEqual(await readFile(file), bytesBeforeMutation, `${operation.name} changed rejected storage`)
+      assert.deepEqual((await readdir(scratch)).sort(), entriesBeforeMutation, `${operation.name} left a temporary artifact`)
+      assert.deepEqual(await readFile(file), invalidBytes, `${operation.name} did not preserve the original byte buffer`)
+    } finally {
+      await rm(scratch, { recursive: true, force: true })
+    }
+  }
+  pass("shouldRejectSaveAndDeleteBeforeWritingWhenStorageBecomesInvalid")
+}
+
+async function shouldUseLatestValidStorageForMutationsAndSupportFirstSave(): Promise<void> {
+  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-presets-latest."))
+  try {
+    // Given a missing storage file
+    const firstSaveFile = path.join(scratch, "first-save.json")
+    const first = { name: "first", savedAt: "2026-01-01T00:00:00.000Z", assignments: { alpha: { model: "openai/first" } } }
+
+    // When the first preset is saved
+    await savePreset(firstSaveFile, first)
+
+    // Then missing storage supports the first save
+    assert.deepEqual(await loadPresets(firstSaveFile), [first])
+
+    // Given a valid file loaded before an external save changes it
+    const saveFile = path.join(scratch, "external-save.json")
+    await writeJson(saveFile, {
+      version: 1,
+      presets: [{ name: "old", savedAt: "2026-01-01T00:00:00.000Z", assignments: { alpha: { model: "openai/old" } } }],
+    })
+    await loadPresets(saveFile)
+    const externalSave = { name: "external", savedAt: "2026-01-02T00:00:00.000Z", assignments: { beta: { model: "anthropic/external" } } }
+    await writeJson(saveFile, { version: 1, presets: [externalSave] })
+
+    // When a new preset is saved after that external change
+    await savePreset(saveFile, first)
+
+    // Then the new preset is merged with the latest external content
+    assert.deepEqual(await loadPresets(saveFile), [externalSave, first])
+
+    // Given an externally changed file containing the name being overwritten and an unrelated latest entry
+    const overwriteFile = path.join(scratch, "external-overwrite.json")
+    const overwritten = { name: "saved", savedAt: "2026-01-03T00:00:00.000Z", assignments: { gamma: { model: "google/old" } } }
+    const unrelated = { name: "unrelated", savedAt: "2026-01-04T00:00:00.000Z", assignments: { delta: { model: "google/unrelated" } } }
+    await writeJson(overwriteFile, { version: 1, presets: [{ name: "saved", savedAt: "stale", assignments: {} }] })
+    await loadPresets(overwriteFile)
+    await writeJson(overwriteFile, { version: 1, presets: [overwritten, unrelated] })
+
+    // When the existing name is overwritten
+    const replacement = { name: "saved", savedAt: "2026-01-05T00:00:00.000Z", assignments: { epsilon: { model: "openai/replacement" } } }
+    await savePreset(overwriteFile, replacement)
+
+    // Then the latest unrelated entry survives the overwrite
+    assert.deepEqual(await loadPresets(overwriteFile), [replacement, unrelated])
+
+    // Given an externally changed file containing the name being deleted and an unrelated latest entry
+    const deleteFile = path.join(scratch, "external-delete.json")
+    const deleted = { name: "delete-me", savedAt: "2026-01-06T00:00:00.000Z", assignments: { zeta: { model: "openai/delete" } } }
+    const retained = { name: "retain-me", savedAt: "2026-01-07T00:00:00.000Z", assignments: { eta: { model: "anthropic/retain" } } }
+    await writeJson(deleteFile, { version: 1, presets: [deleted] })
+    await loadPresets(deleteFile)
+    await writeJson(deleteFile, { version: 1, presets: [deleted, retained] })
+
+    // When the externally present preset is deleted
+    await deletePreset(deleteFile, deleted.name)
+
+    // Then the latest unrelated entry remains
+    assert.deepEqual(await loadPresets(deleteFile), [retained])
+    pass("shouldUseLatestValidStorageForMutationsAndSupportFirstSave")
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+}
+
+async function shouldWriteExactV1BytesAndCleanTemporaryFilesAfterAtomicMutations(): Promise<void> {
+  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-presets-atomic."))
+  try {
+    // Given missing storage and a first preset
+    const file = path.join(scratch, "model-configurator-presets.json")
+    const first = { name: "first", savedAt: "2026-01-01T00:00:00.000Z", assignments: { alpha: { model: "openai/first" } } }
+
+    // When the first save succeeds
+    await savePreset(file, first)
+
+    // Then the target contains the exact complete v1 document and no temporary file remains
+    assert.deepEqual(
+      await readFile(file),
+      Buffer.from(
+        '{\n  "version": 1,\n  "presets": [\n    {\n      "name": "first",\n      "savedAt": "2026-01-01T00:00:00.000Z",\n      "assignments": {\n        "alpha": {\n          "model": "openai/first"\n        }\n      }\n    }\n  ]\n}\n',
+      ),
+    )
+    assert.deepEqual(await readdir(scratch), ["model-configurator-presets.json"])
+
+    // Given a second preset in the valid target
+    const second = { name: "second", savedAt: "2026-01-02T00:00:00.000Z", assignments: { beta: { model: "anthropic/second", variant: "high" } } }
+    await savePreset(file, second)
+
+    // When the first preset is effectively deleted
+    await deletePreset(file, first.name)
+
+    // Then replacement is exact and the atomic temporary file is cleaned up
+    assert.deepEqual(
+      await readFile(file),
+      Buffer.from(
+        '{\n  "version": 1,\n  "presets": [\n    {\n      "name": "second",\n      "savedAt": "2026-01-02T00:00:00.000Z",\n      "assignments": {\n        "beta": {\n          "model": "anthropic/second",\n          "variant": "high"\n        }\n      }\n    }\n  ]\n}\n',
+      ),
+    )
+    assert.deepEqual(await readdir(scratch), ["model-configurator-presets.json"])
+    pass("shouldWriteExactV1BytesAndCleanTemporaryFilesAfterAtomicMutations")
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+}
+
 async function shouldOverwritePresetWhenSavingUnderExistingName(): Promise<void> {
   const scratch = await createWizardFixture()
   try {
@@ -2270,6 +2419,9 @@ await shouldRoundTripAndOverwritePresetsWhenSaved()
 await shouldRejectEveryInvalidPresetStorageShapeWhenLoaded()
 await shouldLoadOnlyMissingPresetStorageAsEmptyWhenReadFailsOtherwise()
 await shouldReturnEveryValidPresetSortedWithoutNormalization()
+await shouldRejectSaveAndDeleteBeforeWritingWhenStorageBecomesInvalid()
+await shouldUseLatestValidStorageForMutationsAndSupportFirstSave()
+await shouldWriteExactV1BytesAndCleanTemporaryFilesAfterAtomicMutations()
 await shouldOverwritePresetWhenSavingUnderExistingName()
 await shouldToastAndRepromptWhenPresetNameIsEmpty()
 await shouldGroupReviewChangesByParentAgent()
