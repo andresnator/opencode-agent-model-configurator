@@ -1,0 +1,19 @@
+{
+  // Preserve this root comment.
+  "agent": {
+    "alpha": {
+      "model": "openai/old",
+      "variant": "high",
+      "foreign": true
+    },
+    "beta": {
+      "model": "anthropic/old",
+      "variant": "low"
+    },
+    "gamma": {
+      "model": "google/old",
+      "foreign": "keep"
+    }
+  },
+  "foreignRoot": "Configuración"
+}

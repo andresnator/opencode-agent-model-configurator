@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json.schemastore.org/package.json",
+  "name": "opencode-agent-model-configurator",
+  "version": "0.1.0",
+  "description": "Provider-agnostic OpenCode TUI plugin for assigning models and variants to agents.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    "./tui": {
+      "types": "./dist/tui.d.ts",
+      "import": "./dist/tui.js"
+    }
+  },
+  "files": [
+    "dist/",
+    "examples/",
+    "schemas/",
+    "README.md",
+    "LICENSE",
+    "NOTICE.md"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs && tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "tsx tests/contracts.ts",
+    "verify:package": "node scripts/verify-package.mjs",
+    "check": "npm run typecheck && npm test && npm run build && npm run verify:package",
+    "prepack": "npm run build"
+  },
+  "engines": {
+    "opencode": ">=1.17.15 <2"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "1.18.10",
+    "@opentui/core": "0.5.1",
+    "@opentui/keymap": "0.5.1",
+    "@opentui/solid": "0.5.1",
+    "@types/node": "24.13.3",
+    "esbuild": "0.28.1",
+    "jsonc-parser": "3.3.1",
+    "solid-js": "1.9.12",
+    "tsx": "4.23.5",
+    "typescript": "5.9.3"
+  },
+  "overrides": {
+    "@babel/core": "7.29.7"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/andresnator/opencode-agent-model-configurator.git"
+  },
+  "bugs": {
+    "url": "https://github.com/andresnator/opencode-agent-model-configurator/issues"
+  },
+  "homepage": "https://github.com/andresnator/opencode-agent-model-configurator#readme",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "tui",
+    "agents",
+    "models",
+    "variants"
+  ]
+}

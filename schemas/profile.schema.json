@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/andresnator/opencode-agent-model-configurator/main/schemas/profile.schema.json",
+  "title": "OpenCode Agent Model Configurator profile",
+  "type": "object",
+  "required": ["tiers"],
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "tiers": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["agents"],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "variant": {
+            "type": ["string", "null"]
+          },
+          "agents": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "uniqueItems": true
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

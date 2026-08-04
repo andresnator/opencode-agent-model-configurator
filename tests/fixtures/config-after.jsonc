@@ -1,0 +1,13 @@
+{
+  // Preserve this root comment.
+  "agent": {
+    "alpha": {
+      "model": "openai/new",
+      "foreign": true
+    },
+    "gamma": {
+      "foreign": "keep"
+    }
+  },
+  "foreignRoot": "Configuración"
+}

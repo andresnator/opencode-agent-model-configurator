@@ -1,0 +1,16 @@
+{
+  "$schema": "../../schemas/profile.schema.json",
+  "name": "team-example",
+  "description": "Replace the placeholder agent names with agents from your OpenCode installation",
+  "tiers": {
+    "reasoning": {
+      "description": "Agents that make architecture or planning decisions",
+      "variant": "high",
+      "agents": ["primary-agent"]
+    },
+    "execution": {
+      "description": "Agents that implement bounded changes",
+      "agents": ["worker-agent"]
+    }
+  }
+}
