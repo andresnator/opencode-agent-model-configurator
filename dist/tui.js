@@ -231,7 +231,7 @@ function isRecord2(value) {
 
 // src/persistence.ts
 import { randomBytes } from "node:crypto";
-import { link, mkdir, open, readFile as readFile2, rename, rm, stat } from "node:fs/promises";
+import { link, mkdir, open, readFile as readFile2, rm, rmdir, stat } from "node:fs/promises";
 import { homedir as homedir2 } from "node:os";
 import path2 from "node:path";
 
@@ -1651,6 +1651,7 @@ var DEFAULT_FILE_MODE = 384;
 var PRIVATE_DIRECTORY_MODE = 448;
 var FORMATTING_OPTIONS = { insertSpaces: true, tabSize: 2, eol: "\n" };
 var CONFIG_WRITE_OWNERSHIP = /* @__PURE__ */ Symbol("config-write-ownership");
+var CONFIG_SNAPSHOT_IDENTITIES = /* @__PURE__ */ new WeakMap();
 var ConfigWriteConflictError = class extends Error {
 };
 async function resolveConfigFile(scope, runtime) {
@@ -1663,9 +1664,16 @@ async function resolveConfigFile(scope, runtime) {
 }
 async function readConfigSnapshot(file) {
   try {
-    const [content, metadata] = await Promise.all([readFile2(file, "utf8"), stat(file)]);
-    const config = parseConfig(content, file);
-    return { file, exists: true, content, mode: metadata.mode & 511, mappings: extractMappings(config) };
+    const handle = await open(file, "r");
+    try {
+      const [content, metadata] = await Promise.all([handle.readFile("utf8"), handle.stat()]);
+      const config = parseConfig(content, file);
+      const snapshot = { file, exists: true, content, mode: metadata.mode & 511, mappings: extractMappings(config) };
+      CONFIG_SNAPSHOT_IDENTITIES.set(snapshot, identityFromMetadata(metadata));
+      return snapshot;
+    } finally {
+      await handle.close();
+    }
   } catch (error) {
     if (!isMissing(error)) throw error;
     return { file, exists: false, content: "{}\n", mode: DEFAULT_FILE_MODE, mappings: {} };
@@ -1701,7 +1709,11 @@ async function writeConfigChangesWithOwnership(snapshot, changes, hooks = {}) {
 async function writeConfigChangesFromOwnership(ownership, changes, hooks = {}) {
   const state = activeOwnership(ownership);
   const snapshot = { ...state.snapshot, exists: true, content: state.content, mode: state.mode };
-  const written = await writeConfigChangesInternal(snapshot, changes, hooks, { expectedOwnership: ownership });
+  const written = await writeConfigChangesInternal(snapshot, changes, hooks, {
+    expectedOwnership: ownership,
+    retainOwnership: true
+  });
+  if (written.ownership) await transferConfigWriteOwnership(ownership, written.ownership);
   return written.result;
 }
 async function releaseConfigWriteOwnership(ownership) {
@@ -1717,31 +1729,73 @@ async function releaseConfigWriteOwnership(ownership) {
 }
 async function restoreOwnedConfigSnapshot(ownership) {
   const state = activeOwnership(ownership);
-  const { snapshot, artifacts } = state;
+  const { snapshot, artifacts, artifactOwnership } = state;
   const conflictMessage = `${snapshot.file} rollback conflict: configuration changed after the plugin write; preserving newer content`;
   let conflict = false;
+  let publicationMoved = false;
+  let restorationMatchesSnapshot = true;
+  if (snapshot.exists) {
+    try {
+      const restorationIdentity = await reserveArtifactLink(
+        artifacts.claim,
+        artifacts.restoration,
+        artifactOwnership,
+        "restoration"
+      );
+      const claimIdentity = artifactOwnership.identities.claim;
+      restorationMatchesSnapshot = Boolean(
+        claimIdentity && sameIdentity(restorationIdentity, claimIdentity) && await matchesSnapshot(artifacts.restoration, snapshot, state.mode)
+      );
+    } catch (error) {
+      await closeConfigWriteOwnership(ownership);
+      if (isMissing(error)) throw configWriteConflict(snapshot, conflictMessage);
+      throw error;
+    }
+  }
   try {
-    await rename(snapshot.file, artifacts.recovery);
+    const recoveryIdentity = await reserveArtifactLink(snapshot.file, artifacts.recovery, artifactOwnership, "recovery");
+    if (!await removePathWithIdentity(snapshot.file, recoveryIdentity)) {
+      artifactOwnership.preserved.add("recovery");
+      throw new Error(`${snapshot.file} recovery found multiple concurrent edits; preserving ${artifacts.recovery}`);
+    }
+    publicationMoved = true;
   } catch (error) {
-    if (!isMissing(error)) throw error;
-    await releaseConfigWriteOwnership(ownership);
+    if (!isMissing(error)) {
+      await closeConfigWriteOwnership(ownership);
+      throw error;
+    }
+    await closeConfigWriteOwnership(ownership);
     throw configWriteConflict(snapshot, conflictMessage);
   }
-  if (!await ownershipPublicationMatchesFile(state, artifacts.recovery)) {
-    await restoreWithoutClobber(artifacts.recovery, snapshot.file, true);
-    conflict = true;
-  } else if (snapshot.exists) {
-    const claimMatchesSnapshot = await retainedClaimMatchesSnapshot(state);
-    const restored = await restoreWithoutClobber(
-      artifacts.claim,
-      snapshot.file,
-      !claimMatchesSnapshot
-    );
-    conflict = !claimMatchesSnapshot || !restored;
-  } else {
-    conflict = await exists(snapshot.file);
+  try {
+    if (!await ownershipPublicationMatchesFile(state, artifacts.recovery)) {
+      await restorePreservedArtifact(artifacts, artifactOwnership, "recovery", snapshot.file);
+      conflict = true;
+    } else if (snapshot.exists) {
+      const restored = restorationMatchesSnapshot ? await restoreWithoutClobber(artifacts.restoration, snapshot.file, false) : await restorePreservedArtifact(artifacts, artifactOwnership, "restoration", snapshot.file);
+      conflict = !restorationMatchesSnapshot || !restored;
+    } else {
+      conflict = await exists(snapshot.file);
+    }
+  } catch (error) {
+    let publicationRecoveryError;
+    if (publicationMoved) {
+      try {
+        await restorePreservedArtifact(artifacts, artifactOwnership, "recovery", snapshot.file);
+      } catch (recoveryError) {
+        publicationRecoveryError = recoveryError;
+      }
+    }
+    await closeConfigWriteOwnership(ownership);
+    if (publicationRecoveryError) {
+      throw new AggregateError(
+        [error, publicationRecoveryError],
+        `${snapshot.file} rollback failed while preserving concurrent lineages`
+      );
+    }
+    throw error;
   }
-  await discardConfigWriteOwnership(ownership);
+  await closeConfigWriteOwnership(ownership);
   if (conflict) throw configWriteConflict(snapshot, conflictMessage);
 }
 function isConfigWriteConflictError(error) {
@@ -1765,15 +1819,13 @@ async function writeConfigContent(snapshot, rendered, hooks = {}, options = {}) 
   await mkdir(directory, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
   await requireExpectedOwnership(snapshot, options);
   if (snapshot.exists) {
-    let current;
     try {
-      current = await readFile2(snapshot.file, "utf8");
+      if (!await matchesSnapshot(snapshot.file, snapshot, snapshot.mode)) {
+        throw configWriteConflict(snapshot, conflictMessage);
+      }
     } catch (error) {
       if (isMissing(error)) throw configWriteConflict(snapshot, conflictMessage);
       throw error;
-    }
-    if (current !== snapshot.content) {
-      throw configWriteConflict(snapshot, conflictMessage);
     }
   } else if (await exists(snapshot.file)) {
     throw configWriteConflict(snapshot, conflictMessage);
@@ -1784,6 +1836,7 @@ async function writeConfigContent(snapshot, rendered, hooks = {}, options = {}) 
     directory: operationDirectory,
     temporary: path2.join(operationDirectory, "temporary"),
     claim: path2.join(operationDirectory, "claim"),
+    restoration: path2.join(operationDirectory, "restoration"),
     recovery: path2.join(operationDirectory, "recovery")
   };
   const state = {
@@ -1793,12 +1846,15 @@ async function writeConfigContent(snapshot, rendered, hooks = {}, options = {}) 
   };
   const mode = snapshot.mode;
   let artifactsOwned = false;
+  const artifactOwnership = { identities: {}, preserved: /* @__PURE__ */ new Set() };
   try {
     await hooks.before?.("temporary-open");
     await mkdir(artifacts.directory, { mode: PRIVATE_DIRECTORY_MODE });
     artifactsOwned = true;
+    artifactOwnership.identities.directory = await fileIdentity(artifacts.directory);
     const handle = await open(artifacts.temporary, "wx", mode);
     try {
+      artifactOwnership.identities.temporary = identityFromMetadata(await handle.stat());
       await hooks.before?.("temporary-write");
       await handle.writeFile(rendered, "utf8");
       await hooks.before?.("temporary-flush");
@@ -1809,13 +1865,18 @@ async function writeConfigContent(snapshot, rendered, hooks = {}, options = {}) 
     }
     await hooks.before?.("rename");
     if (snapshot.exists) {
+      let claimIdentity;
       try {
-        await rename(snapshot.file, artifacts.claim);
+        claimIdentity = await reserveArtifactLink(
+          snapshot.file,
+          artifacts.claim,
+          artifactOwnership,
+          "claim"
+        );
       } catch (error) {
         if (isMissing(error)) throw configWriteConflict(snapshot, conflictMessage);
         throw error;
       }
-      state.destinationClaimed = true;
       state.claimMatchesSnapshot = await matchesWriteBaseline(
         artifacts.claim,
         snapshot,
@@ -1823,6 +1884,10 @@ async function writeConfigContent(snapshot, rendered, hooks = {}, options = {}) 
         expectedOwnership
       );
       if (!state.claimMatchesSnapshot) throw configWriteConflict(snapshot, conflictMessage);
+      if (!await removePathWithIdentity(snapshot.file, claimIdentity)) {
+        throw configWriteConflict(snapshot, conflictMessage);
+      }
+      state.destinationClaimed = true;
     }
     try {
       await link(artifacts.temporary, snapshot.file);
@@ -1854,10 +1919,10 @@ async function writeConfigContent(snapshot, rendered, hooks = {}, options = {}) 
     if (retainOwnership) {
       return {
         result: { file: snapshot.file },
-        ownership: createConfigWriteOwnership(snapshot, rendered, mode, artifacts)
+        ownership: createConfigWriteOwnership(snapshot, rendered, mode, artifacts, artifactOwnership)
       };
     }
-    await rm(artifacts.directory, { recursive: true });
+    await cleanupWriteArtifacts(artifacts, artifactOwnership);
     artifactsOwned = false;
     await syncDirectory(directory);
     return { result: { file: snapshot.file } };
@@ -1865,30 +1930,47 @@ async function writeConfigContent(snapshot, rendered, hooks = {}, options = {}) 
     if (!artifactsOwned) throw error;
     let ownershipLost;
     try {
-      ownershipLost = await recoverConfigWrite(snapshot, rendered, mode, artifacts, state);
-      await rm(artifacts.directory, { recursive: true });
+      ownershipLost = await recoverConfigWrite(snapshot, rendered, mode, artifacts, artifactOwnership, state, hooks);
+      await cleanupWriteArtifacts(artifacts, artifactOwnership);
       artifactsOwned = false;
       await syncDirectory(directory);
     } catch (recoveryError) {
+      try {
+        await cleanupWriteArtifacts(artifacts, artifactOwnership);
+        artifactsOwned = false;
+        await syncDirectory(directory);
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, recoveryError, cleanupError],
+          `${snapshot.file} write failed and operation-owned artifacts could not be recovered or cleaned`
+        );
+      }
       throw new AggregateError(
         [error, recoveryError],
         `${snapshot.file} write failed and operation-owned artifacts could not be recovered`
       );
     }
     if (ownershipLost && !(error instanceof ConfigWriteConflictError)) {
-      throw configWriteConflict(snapshot, conflictMessage);
+      throw new AggregateError(
+        [error, configWriteConflict(snapshot, conflictMessage)],
+        `${snapshot.file} write failed after a concurrent ownership conflict`
+      );
     }
     throw error;
   }
 }
-function createConfigWriteOwnership(snapshot, content, mode, artifacts) {
+function createConfigWriteOwnership(snapshot, content, mode, artifacts, artifactOwnership) {
+  const ownedSnapshot = { ...snapshot, mappings: { ...snapshot.mappings } };
+  const snapshotIdentity = CONFIG_SNAPSHOT_IDENTITIES.get(snapshot);
+  if (snapshotIdentity) CONFIG_SNAPSHOT_IDENTITIES.set(ownedSnapshot, snapshotIdentity);
   return {
     file: snapshot.file,
     [CONFIG_WRITE_OWNERSHIP]: {
-      snapshot: { ...snapshot, mappings: { ...snapshot.mappings } },
+      snapshot: ownedSnapshot,
       content,
       mode,
       artifacts,
+      artifactOwnership,
       active: true
     }
   };
@@ -1897,6 +1979,37 @@ function activeOwnership(ownership) {
   const state = ownership[CONFIG_WRITE_OWNERSHIP];
   if (!state.active) throw new Error(`${ownership.file} write ownership is no longer active`);
   return state;
+}
+async function transferConfigWriteOwnership(ownership, replacement) {
+  const current = activeOwnership(ownership);
+  const next = activeOwnership(replacement);
+  const nextClaimIdentity = next.artifactOwnership.identities.claim;
+  if (!nextClaimIdentity || !await removePathWithIdentity(next.artifacts.claim, nextClaimIdentity)) {
+    throw new Error(`${ownership.file} fallback ownership claim could not be transferred`);
+  }
+  delete next.artifactOwnership.identities.claim;
+  if (current.snapshot.exists) {
+    if (!await retainedClaimMatchesSnapshot(current)) throw configWriteConflict(current.snapshot);
+    const transferredClaimIdentity = await reserveArtifactLink(
+      current.artifacts.claim,
+      next.artifacts.claim,
+      next.artifactOwnership,
+      "claim"
+    );
+    const currentClaimIdentity = current.artifactOwnership.identities.claim;
+    if (!currentClaimIdentity || !sameIdentity(transferredClaimIdentity, currentClaimIdentity) || !await matchesSnapshot(next.artifacts.claim, current.snapshot, current.mode)) {
+      throw configWriteConflict(current.snapshot);
+    }
+  }
+  const originalSnapshot = current.snapshot;
+  await cleanupWriteArtifacts(current.artifacts, current.artifactOwnership);
+  current.snapshot = originalSnapshot;
+  current.content = next.content;
+  current.mode = next.mode;
+  current.artifacts = next.artifacts;
+  current.artifactOwnership = next.artifactOwnership;
+  next.active = false;
+  await syncDirectory(path2.dirname(ownership.file));
 }
 async function requireExpectedOwnership(snapshot, options) {
   if (!options.expectedOwnership) return;
@@ -1922,6 +2035,8 @@ async function ownershipPublicationMatchesFile(state, file) {
 }
 async function retainedClaimMatchesSnapshot(state) {
   if (!state.snapshot.exists) return !await exists(state.artifacts.claim);
+  const claimIdentity = state.artifactOwnership.identities.claim;
+  if (!claimIdentity || !await pathHasIdentity(state.artifacts.claim, claimIdentity)) return false;
   try {
     return await matchesSnapshot(state.artifacts.claim, state.snapshot, state.mode);
   } catch (error) {
@@ -1931,67 +2046,168 @@ async function retainedClaimMatchesSnapshot(state) {
 }
 async function preserveChangedRetainedClaim(ownership) {
   const state = activeOwnership(ownership);
-  const { artifacts } = state;
+  const { artifacts, artifactOwnership } = state;
   if (await retainedClaimMatchesSnapshot(state)) return false;
   if (await haveSameIdentity(artifacts.claim, ownership.file)) return true;
+  try {
+    await reserveArtifactLink(artifacts.claim, artifacts.restoration, artifactOwnership, "restoration");
+  } catch (error) {
+    await closeConfigWriteOwnership(ownership);
+    if (isMissing(error)) throw configWriteConflict(state.snapshot);
+    throw error;
+  }
   let publicationMoved = false;
   try {
-    await rename(ownership.file, artifacts.recovery);
-    publicationMoved = true;
+    const recoveryIdentity = await reserveArtifactLink(ownership.file, artifacts.recovery, artifactOwnership, "recovery");
+    publicationMoved = await removePathWithIdentity(ownership.file, recoveryIdentity);
+    if (!publicationMoved) artifactOwnership.preserved.add("recovery");
   } catch (error) {
-    if (!isMissing(error)) throw error;
+    artifactOwnership.preserved.add("restoration");
+    await closeConfigWriteOwnership(ownership);
+    if (isMissing(error)) throw configWriteConflict(state.snapshot);
+    throw error;
   }
-  if (publicationMoved && !await ownershipPublicationMatchesFile(state, artifacts.recovery)) {
-    await restoreWithoutClobber(artifacts.recovery, ownership.file, true);
-    throw new Error(`${ownership.file} recovery found multiple concurrent edits; preserving both paths`);
+  try {
+    if (!publicationMoved) {
+      artifactOwnership.preserved.add("restoration");
+      throw new Error(`${ownership.file} recovery found multiple concurrent edits; preserving ${artifacts.recovery}`);
+    }
+    if (!await ownershipPublicationMatchesFile(state, artifacts.recovery)) {
+      await restorePreservedArtifact(artifacts, artifactOwnership, "recovery", ownership.file);
+      artifactOwnership.preserved.add("restoration");
+      throw new Error(`${ownership.file} recovery found multiple concurrent edits; preserving ${artifacts.restoration}`);
+    }
+    await restorePreservedArtifact(artifacts, artifactOwnership, "restoration", ownership.file);
+    await syncFile(ownership.file);
+    await syncDirectory(path2.dirname(ownership.file));
+    return true;
+  } catch (error) {
+    let publicationRecoveryError;
+    if (publicationMoved) {
+      try {
+        await restorePreservedArtifact(artifacts, artifactOwnership, "recovery", ownership.file);
+      } catch (recoveryError) {
+        publicationRecoveryError = recoveryError;
+      }
+    }
+    if (!await haveSameIdentity(artifacts.restoration, ownership.file)) {
+      artifactOwnership.preserved.add("restoration");
+    }
+    await closeConfigWriteOwnership(ownership);
+    if (publicationRecoveryError) {
+      throw new AggregateError(
+        [error, publicationRecoveryError],
+        `${ownership.file} ownership release failed while preserving concurrent lineages`
+      );
+    }
+    throw error;
   }
-  await linkRetainedClaimWithoutClobber(artifacts.claim, ownership.file);
-  await syncFile(ownership.file);
-  await syncDirectory(path2.dirname(ownership.file));
-  return true;
 }
 async function discardConfigWriteOwnership(ownership) {
   const state = activeOwnership(ownership);
   if (!await retainedClaimCanBeRemoved(state, ownership.file)) {
     throw new Error(`${ownership.file} retained claim changed; preserving it for recovery`);
   }
-  await rm(state.artifacts.directory, { recursive: true });
+  await cleanupWriteArtifacts(state.artifacts, state.artifactOwnership);
+  state.active = false;
+  await syncDirectory(path2.dirname(ownership.file));
+}
+async function closeConfigWriteOwnership(ownership) {
+  const state = activeOwnership(ownership);
+  await cleanupWriteArtifacts(state.artifacts, state.artifactOwnership);
   state.active = false;
   await syncDirectory(path2.dirname(ownership.file));
 }
 async function retainedClaimCanBeRemoved(state, destination) {
   return await retainedClaimMatchesSnapshot(state) || haveSameIdentity(state.artifacts.claim, destination);
 }
-async function linkRetainedClaimWithoutClobber(claim, destination) {
-  try {
-    await link(claim, destination);
-  } catch (error) {
-    if (!isAlreadyPresent(error)) throw error;
-    if (!await haveSameIdentity(claim, destination)) {
-      throw new Error(`${destination} recovery found multiple concurrent edits; preserving both paths`);
-    }
-  }
-}
-async function recoverConfigWrite(snapshot, rendered, mode, artifacts, state) {
+async function recoverConfigWrite(snapshot, rendered, mode, artifacts, artifactOwnership, state, hooks) {
   if (state.destinationPublished) {
     try {
-      await rename(snapshot.file, artifacts.recovery);
+      const recoveryIdentity = await reserveArtifactLink(snapshot.file, artifacts.recovery, artifactOwnership, "recovery");
+      if (!await removePathWithIdentity(snapshot.file, recoveryIdentity)) {
+        artifactOwnership.preserved.add("recovery");
+        return true;
+      }
     } catch (error) {
       if (isMissing(error)) return true;
       throw error;
     }
     if (!await isOwnedPublication(artifacts.temporary, artifacts.recovery, rendered, mode)) {
-      await restoreWithoutClobber(artifacts.recovery, snapshot.file, true);
+      await hooks.before?.("recovery-restore");
+      await restorePreservedArtifact(artifacts, artifactOwnership, "recovery", snapshot.file);
       return true;
     }
   }
   if (!state.destinationClaimed) return false;
-  const restored = await restoreWithoutClobber(
-    artifacts.claim,
-    snapshot.file,
-    !state.claimMatchesSnapshot
-  );
+  const restored = state.claimMatchesSnapshot ? await restoreWithoutClobber(artifacts.claim, snapshot.file, false) : await restorePreservedArtifact(artifacts, artifactOwnership, "claim", snapshot.file);
   return !state.claimMatchesSnapshot || !restored;
+}
+async function restorePreservedArtifact(artifacts, ownership, name, destination) {
+  ownership.preserved.add(name);
+  const restored = await restoreWithoutClobber(artifacts[name], destination, true);
+  if (restored || await haveSameIdentity(artifacts[name], destination)) {
+    ownership.preserved.delete(name);
+  }
+  return restored;
+}
+async function reserveArtifactLink(source, destination, ownership, name) {
+  const identity = await fileIdentity(source);
+  try {
+    await link(source, destination);
+  } catch (error) {
+    if (isAlreadyPresent(error)) {
+      throw new Error(`${destination} already exists; preserving foreign write artifact`);
+    }
+    throw error;
+  }
+  ownership.identities[name] = identity;
+  if (!await pathHasIdentity(destination, identity)) {
+    ownership.preserved.add(name);
+    throw new Error(`${destination} identity changed after reservation; preserving foreign write artifact`);
+  }
+  return identity;
+}
+async function cleanupWriteArtifacts(artifacts, ownership) {
+  for (const name of ["recovery", "restoration", "claim", "temporary"]) {
+    if (ownership.preserved.has(name)) continue;
+    const identity = ownership.identities[name];
+    if (identity) await removePathWithIdentity(artifacts[name], identity);
+  }
+  const directoryIdentity = ownership.identities.directory;
+  if (!directoryIdentity || !await pathHasIdentity(artifacts.directory, directoryIdentity)) return;
+  try {
+    await rmdir(artifacts.directory);
+  } catch (error) {
+    if (!isMissing(error) && !isDirectoryNotEmpty(error)) throw error;
+  }
+}
+async function removePathWithIdentity(file, identity) {
+  if (!await pathHasIdentity(file, identity)) return false;
+  try {
+    await rm(file);
+    return true;
+  } catch (error) {
+    if (isMissing(error)) return false;
+    throw error;
+  }
+}
+async function pathHasIdentity(file, identity) {
+  try {
+    return sameIdentity(identityFromMetadata(await stat(file)), identity);
+  } catch (error) {
+    if (isMissing(error)) return false;
+    throw error;
+  }
+}
+async function fileIdentity(file) {
+  return identityFromMetadata(await stat(file));
+}
+function identityFromMetadata(metadata) {
+  return { dev: metadata.dev, ino: metadata.ino };
+}
+function sameIdentity(left, right) {
+  return left.dev === right.dev && left.ino === right.ino;
 }
 async function restoreWithoutClobber(source, destination, sourceIsExternal) {
   try {
@@ -1999,8 +2215,8 @@ async function restoreWithoutClobber(source, destination, sourceIsExternal) {
     return true;
   } catch (error) {
     if (!isAlreadyPresent(error)) throw error;
-    if (sourceIsExternal && !await haveSameState(source, destination)) {
-      throw new Error(`${destination} recovery found multiple concurrent edits; preserving both paths`);
+    if (sourceIsExternal && !await haveSameIdentity(source, destination)) {
+      throw new Error(`${destination} recovery found another concurrent edit; preserving ${source}`);
     }
     return false;
   }
@@ -2014,17 +2230,14 @@ async function isOwnedPublication(temporary, destination, rendered, mode) {
   return temporaryMetadata.dev === destinationMetadata.dev && temporaryMetadata.ino === destinationMetadata.ino && (destinationMetadata.mode & 511) === mode && content === rendered;
 }
 async function matchesSnapshot(file, snapshot, mode) {
-  const [content, metadata] = await Promise.all([readFile2(file, "utf8"), stat(file)]);
-  return content === snapshot.content && (metadata.mode & 511) === mode;
-}
-async function haveSameState(left, right) {
-  const [leftMetadata, rightMetadata, leftBytes, rightBytes] = await Promise.all([
-    stat(left),
-    stat(right),
-    readFile2(left),
-    readFile2(right)
-  ]);
-  return (leftMetadata.mode & 511) === (rightMetadata.mode & 511) && leftBytes.equals(rightBytes);
+  const handle = await open(file, "r");
+  try {
+    const [content, metadata] = await Promise.all([handle.readFile("utf8"), handle.stat()]);
+    const expectedIdentity = CONFIG_SNAPSHOT_IDENTITIES.get(snapshot);
+    return content === snapshot.content && (metadata.mode & 511) === mode && (!expectedIdentity || sameIdentity(identityFromMetadata(metadata), expectedIdentity));
+  } finally {
+    await handle.close();
+  }
 }
 async function haveSameIdentity(left, right) {
   try {
@@ -2125,6 +2338,9 @@ function isMissing(error) {
 function isAlreadyPresent(error) {
   return isRecord3(error) && error.code === "EEXIST";
 }
+function isDirectoryNotEmpty(error) {
+  return isRecord3(error) && error.code === "ENOTEMPTY";
+}
 
 // src/hot-apply.ts
 async function applyConfigChanges(client, scope, runtime, snapshot, changes, hooks = {}) {
@@ -2148,6 +2364,7 @@ async function applyConfigChanges(client, scope, runtime, snapshot, changes, hoo
       return { file: snapshot.file, hotApplied: true };
     }
     const result = ownership ? await writeConfigChangesFromOwnership(ownership, plan.fallbackChanges, hooks) : await writeConfigChanges(snapshot, plan.fallbackChanges, hooks);
+    if (ownership) await hooks.before?.("ownership-release");
     applyCompleted = true;
     if (ownership) await releaseConfigWriteOwnership(ownership);
     return outcome(result.file, hot);
@@ -2245,7 +2462,7 @@ function errorReason(error) {
 
 // src/presets.ts
 import { randomBytes as randomBytes2 } from "node:crypto";
-import { mkdir as mkdir2, open as open2, readFile as readFile3, rename as rename2, rm as rm2 } from "node:fs/promises";
+import { mkdir as mkdir2, open as open2, readFile as readFile3, rename, rm as rm2 } from "node:fs/promises";
 import path3 from "node:path";
 import { TextDecoder } from "node:util";
 var PRESETS_FILE = "model-configurator-presets.json";
@@ -2327,7 +2544,7 @@ async function writePresets(file, presets) {
     } finally {
       await handle.close();
     }
-    await rename2(temporary, file);
+    await rename(temporary, file);
     temporaryOwned = false;
     await syncDirectory2(directory);
   } catch (error) {

@@ -90,6 +90,7 @@ export async function applyConfigChanges(
     const result = ownership
       ? await writeConfigChangesFromOwnership(ownership, plan.fallbackChanges, hooks)
       : await writeConfigChanges(snapshot, plan.fallbackChanges, hooks)
+    if (ownership) await hooks.before?.("ownership-release")
     applyCompleted = true
     if (ownership) await releaseConfigWriteOwnership(ownership)
     return outcome(result.file, hot)

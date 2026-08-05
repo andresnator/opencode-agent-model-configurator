@@ -53,15 +53,26 @@ const CONFIG_FILE_MODE = 0o640
 const CONFIG_BEFORE_BYTES = await readFile(path.join(FIXTURES, "config-before.jsonc"))
 const CONFIG_AFTER_BYTES = await readFile(path.join(FIXTURES, "config-after.jsonc"))
 const LATE_EDIT_BYTES = Buffer.from('{\n  "external": true\n}\n')
+const SECOND_EXTERNAL_EDIT_BYTES = Buffer.from('{\n  "secondExternal": true\n}\n')
 const GLOBAL_CONFIG_BYTES = Buffer.from(
   '{\n  "agent": {\n    "alpha": {"model": "openai/old"},\n    "beta": {"model": "anthropic/old"}\n  }\n}\n',
 )
 const GLOBAL_EXTERNAL_EDIT_BYTES = Buffer.from(
   '{\n  "external": true,\n  "agent": {\n    "alpha": {"model": "openai/external"}\n  }\n}\n',
 )
+const GLOBAL_PRELUDE_BYTES = Buffer.from(
+  '{\n  "agent": {\n    "alpha": {\n      "model": "openai/old"\n    }\n  }\n}\n',
+)
+const GLOBAL_FALLBACK_BYTES = Buffer.from(
+  '{\n  "agent": {\n    "alpha": {\n      "model": "openai/new"\n    }\n  }\n}\n',
+)
 const INJECTED_FALLBACK_FAILURE = "injected fallback failure"
+const INJECTED_POST_VALIDATE_FAILURE = "injected post-validate failure"
 const CONFIG_WRITE_DIRECTORY_SUFFIX = ".write"
 const CONFIG_WRITE_CLAIM_NAME = "claim"
+const CONFIG_WRITE_RECOVERY_NAME = "recovery"
+const FOREIGN_ARTIFACT_BYTES = Buffer.from("foreign artifact bytes\n")
+const FOREIGN_ARTIFACT_MODE = 0o604
 const FIRST_CONFIG_CHANGES: readonly AgentChange[] = [
   { agent: "alpha", before: {}, after: { model: "openai/new" }, action: "set" },
 ]
@@ -445,6 +456,431 @@ async function shouldPreserveLateConcurrentEditWhenFinalPublicationLosesOwnershi
       },
     )
     pass("shouldPreserveLateConcurrentEditWhenFinalPublicationLosesOwnership")
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+}
+
+async function shouldRejectIdenticalStateDifferentInodeAtClaimCheckpoint(): Promise<void> {
+  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-persistence."))
+  try {
+    // Given
+    const file = path.join(scratch, CONFIG_FILE_NAME)
+    await writeFile(file, CONFIG_BEFORE_BYTES, { mode: CONFIG_FILE_MODE })
+    const reviewedIdentity = await stat(file)
+    const snapshot = await readConfigSnapshot(file)
+    let substitutedIdentity: Awaited<ReturnType<typeof stat>> | undefined
+    let bytesBeforeSubstitution: Buffer | undefined
+    let bytesAfterSubstitution: Buffer | undefined
+    let failure: unknown
+
+    // When
+    try {
+      await writeConfigChanges(snapshot, fixtureChanges(), {
+        async before(step) {
+          if (step !== "rename") return
+          bytesBeforeSubstitution = await readFile(file)
+          await rm(file)
+          await writeFile(file, CONFIG_BEFORE_BYTES, { mode: CONFIG_FILE_MODE })
+          substitutedIdentity = await stat(file)
+          bytesAfterSubstitution = await readFile(file)
+        },
+      })
+    } catch (error) {
+      failure = error
+    }
+
+    // Then
+    const finalDestinationIdentity = await stat(file)
+    assert.deepEqual(
+      {
+        failure: failure instanceof Error ? failure.message : failure,
+        bytesBeforeSubstitution,
+        bytesAfterSubstitution,
+        finalBytes: await readFile(file),
+        finalMode: finalDestinationIdentity.mode & 0o777,
+        substitutionChangedIdentity: substitutedIdentity
+          ? !sameFileIdentity(reviewedIdentity, substitutedIdentity)
+          : false,
+        substitutedIdentityPreserved: substitutedIdentity
+          ? sameFileIdentity(substitutedIdentity, finalDestinationIdentity)
+          : false,
+        entries: (await readdir(scratch)).sort(),
+      },
+      {
+        failure: `${file} changed while the configurator was open; reload and retry`,
+        bytesBeforeSubstitution: CONFIG_BEFORE_BYTES,
+        bytesAfterSubstitution: CONFIG_BEFORE_BYTES,
+        finalBytes: CONFIG_BEFORE_BYTES,
+        finalMode: CONFIG_FILE_MODE,
+        substitutionChangedIdentity: true,
+        substitutedIdentityPreserved: true,
+        entries: [CONFIG_FILE_NAME],
+      },
+    )
+    pass("shouldRejectIdenticalStateDifferentInodeAtClaimCheckpoint")
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+}
+
+async function shouldPreserveForeignClaimWhenNoClobberReservationCollides(): Promise<void> {
+  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-persistence."))
+  try {
+    // Given
+    const file = path.join(scratch, CONFIG_FILE_NAME)
+    await writeFile(file, CONFIG_BEFORE_BYTES, { mode: CONFIG_FILE_MODE })
+    const snapshot = await readConfigSnapshot(file)
+    const destinationIdentity = await stat(file)
+    let operationDirectory = ""
+    let claim = ""
+    let foreignClaimIdentity: Awaited<ReturnType<typeof stat>> | undefined
+    let destinationBytesAtCheckpoint: Buffer | undefined
+    let failure: unknown
+
+    // When
+    try {
+      await writeConfigChanges(snapshot, fixtureChanges(), {
+        async before(step) {
+          if (step !== "rename") return
+          destinationBytesAtCheckpoint = await readFile(file)
+          operationDirectory = await configWriteDirectory(scratch)
+          claim = path.join(operationDirectory, CONFIG_WRITE_CLAIM_NAME)
+          await writeFile(claim, FOREIGN_ARTIFACT_BYTES, { mode: FOREIGN_ARTIFACT_MODE })
+          foreignClaimIdentity = await stat(claim)
+        },
+      })
+    } catch (error) {
+      failure = error
+    }
+
+    // Then
+    const finalDestinationIdentity = await stat(file)
+    const finalClaimIdentity = await stat(claim)
+    assert.deepEqual(
+      {
+        failure: failure instanceof Error ? failure.message : failure,
+        destinationBytesAtCheckpoint,
+        destinationBytes: await readFile(file),
+        destinationMode: finalDestinationIdentity.mode & 0o777,
+        destinationIdentityPreserved: sameFileIdentity(destinationIdentity, finalDestinationIdentity),
+        claimBytes: await readFile(claim),
+        claimMode: finalClaimIdentity.mode & 0o777,
+        claimIdentityPreserved: foreignClaimIdentity
+          ? sameFileIdentity(foreignClaimIdentity, finalClaimIdentity)
+          : false,
+        entries: (await readdir(scratch)).sort(),
+        artifactEntries: (await readdir(operationDirectory)).sort(),
+      },
+      {
+        failure: `${claim} already exists; preserving foreign write artifact`,
+        destinationBytesAtCheckpoint: CONFIG_BEFORE_BYTES,
+        destinationBytes: CONFIG_BEFORE_BYTES,
+        destinationMode: CONFIG_FILE_MODE,
+        destinationIdentityPreserved: true,
+        claimBytes: FOREIGN_ARTIFACT_BYTES,
+        claimMode: FOREIGN_ARTIFACT_MODE,
+        claimIdentityPreserved: true,
+        entries: [CONFIG_FILE_NAME, path.basename(operationDirectory)].sort(),
+        artifactEntries: [CONFIG_WRITE_CLAIM_NAME],
+      },
+    )
+    pass("shouldPreserveForeignClaimWhenNoClobberReservationCollides")
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+}
+
+async function shouldPreserveForeignRecoveryWhenNoClobberReservationCollides(): Promise<void> {
+  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-persistence."))
+  try {
+    // Given
+    const file = path.join(scratch, CONFIG_FILE_NAME)
+    await writeFile(file, CONFIG_BEFORE_BYTES, { mode: CONFIG_FILE_MODE })
+    const snapshot = await readConfigSnapshot(file)
+    let operationDirectory = ""
+    let recovery = ""
+    let foreignRecoveryIdentity: Awaited<ReturnType<typeof stat>> | undefined
+    let externalDestinationIdentity: Awaited<ReturnType<typeof stat>> | undefined
+    let destinationBytesAtCheckpoint: Buffer | undefined
+    let failure: unknown
+
+    // When
+    try {
+      await writeConfigChanges(snapshot, fixtureChanges(), {
+        async before(step) {
+          if (step !== "post-validate") return
+          operationDirectory = await configWriteDirectory(scratch)
+          recovery = path.join(operationDirectory, CONFIG_WRITE_RECOVERY_NAME)
+          await writeFile(recovery, FOREIGN_ARTIFACT_BYTES, { mode: FOREIGN_ARTIFACT_MODE })
+          foreignRecoveryIdentity = await stat(recovery)
+          await rm(file)
+          await writeFile(file, LATE_EDIT_BYTES, { mode: CONFIG_FILE_MODE })
+          externalDestinationIdentity = await stat(file)
+          destinationBytesAtCheckpoint = await readFile(file)
+          throw new Error(INJECTED_POST_VALIDATE_FAILURE)
+        },
+      })
+    } catch (error) {
+      failure = error
+    }
+
+    // Then
+    const finalDestinationIdentity = await stat(file)
+    const finalRecoveryIdentity = await stat(recovery)
+    assert.deepEqual(
+      {
+        rejection: {
+          aggregate: failure instanceof AggregateError,
+          message: failure instanceof Error ? failure.message : failure,
+          causes: failure instanceof AggregateError
+            ? failure.errors.map((error) => (error instanceof Error ? error.message : String(error)))
+            : [],
+        },
+        destinationBytesAtCheckpoint,
+        destinationBytes: await readFile(file),
+        destinationMode: finalDestinationIdentity.mode & 0o777,
+        destinationIdentityPreserved: externalDestinationIdentity
+          ? sameFileIdentity(externalDestinationIdentity, finalDestinationIdentity)
+          : false,
+        recoveryBytes: await readFile(recovery),
+        recoveryMode: finalRecoveryIdentity.mode & 0o777,
+        recoveryIdentityPreserved: foreignRecoveryIdentity
+          ? sameFileIdentity(foreignRecoveryIdentity, finalRecoveryIdentity)
+          : false,
+        entries: (await readdir(scratch)).sort(),
+        artifactEntries: (await readdir(operationDirectory)).sort(),
+      },
+      {
+        rejection: {
+          aggregate: true,
+          message: `${file} write failed and operation-owned artifacts could not be recovered`,
+          causes: [
+            INJECTED_POST_VALIDATE_FAILURE,
+            `${recovery} already exists; preserving foreign write artifact`,
+          ],
+        },
+        destinationBytesAtCheckpoint: LATE_EDIT_BYTES,
+        destinationBytes: LATE_EDIT_BYTES,
+        destinationMode: CONFIG_FILE_MODE,
+        destinationIdentityPreserved: true,
+        recoveryBytes: FOREIGN_ARTIFACT_BYTES,
+        recoveryMode: FOREIGN_ARTIFACT_MODE,
+        recoveryIdentityPreserved: true,
+        entries: [CONFIG_FILE_NAME, path.basename(operationDirectory)].sort(),
+        artifactEntries: [CONFIG_WRITE_RECOVERY_NAME],
+      },
+    )
+    pass("shouldPreserveForeignRecoveryWhenNoClobberReservationCollides")
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+}
+
+async function shouldPreserveEveryExternalLineageWhenRecoveryFindsSecondEdit(): Promise<void> {
+  const scenarios = [
+    { name: "different-state", secondBytes: SECOND_EXTERNAL_EDIT_BYTES, secondMode: CONFIG_FILE_MODE },
+    { name: "identical-state", secondBytes: LATE_EDIT_BYTES, secondMode: FOREIGN_ARTIFACT_MODE },
+  ] as const
+
+  for (const scenario of scenarios) {
+    const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-persistence."))
+    try {
+      // Given
+      const file = path.join(scratch, CONFIG_FILE_NAME)
+      await writeFile(file, CONFIG_BEFORE_BYTES, { mode: CONFIG_FILE_MODE })
+      const snapshot = await readConfigSnapshot(file)
+      const hookOccurrences = persistenceHookCounts()
+      let operationDirectory = ""
+      let recovery = ""
+      let firstExternalIdentity: Awaited<ReturnType<typeof stat>> | undefined
+      let secondExternalIdentity: Awaited<ReturnType<typeof stat>> | undefined
+      let firstBytesAtCheckpoint: Buffer | undefined
+      let secondBytesAtCheckpoint: Buffer | undefined
+      let destinationAbsentBeforeSecondEdit = false
+      let failure: unknown
+
+      // When
+      try {
+        await writeConfigChanges(snapshot, fixtureChanges(), {
+          async before(step) {
+            hookOccurrences[step] += 1
+            if (step === "post-validate") {
+              operationDirectory = await configWriteDirectory(scratch)
+              recovery = path.join(operationDirectory, CONFIG_WRITE_RECOVERY_NAME)
+              await rm(file)
+              await writeFile(file, LATE_EDIT_BYTES, { mode: FOREIGN_ARTIFACT_MODE })
+              firstExternalIdentity = await stat(file)
+              firstBytesAtCheckpoint = await readFile(file)
+              return
+            }
+            if (step !== "recovery-restore") return
+            destinationAbsentBeforeSecondEdit = await readFile(file).then(
+              () => false,
+              (error: NodeJS.ErrnoException) => {
+                if (error.code === "ENOENT") return true
+                throw error
+              },
+            )
+            await writeFile(file, scenario.secondBytes, { mode: scenario.secondMode })
+            secondExternalIdentity = await stat(file)
+            secondBytesAtCheckpoint = await readFile(file)
+          },
+        })
+      } catch (error) {
+        failure = error
+      }
+
+      // Then
+      const finalDestinationIdentity = await stat(file)
+      const finalRecoveryIdentity = await stat(recovery)
+      assert.deepEqual(
+        {
+          scenario: scenario.name,
+          rejection: {
+            aggregate: failure instanceof AggregateError,
+            message: failure instanceof Error ? failure.message : failure,
+            causes: failure instanceof AggregateError
+              ? failure.errors.map((error) => (error instanceof Error ? error.message : String(error)))
+              : [],
+          },
+          hookOccurrences,
+          firstBytesAtCheckpoint,
+          destinationAbsentBeforeSecondEdit,
+          secondBytesAtCheckpoint,
+          destinationBytes: await readFile(file),
+          destinationMode: finalDestinationIdentity.mode & 0o777,
+          destinationIdentityPreserved: secondExternalIdentity
+            ? sameFileIdentity(secondExternalIdentity, finalDestinationIdentity)
+            : false,
+          recoveryBytes: await readFile(recovery),
+          recoveryMode: finalRecoveryIdentity.mode & 0o777,
+          recoveryIdentityPreserved: firstExternalIdentity
+            ? sameFileIdentity(firstExternalIdentity, finalRecoveryIdentity)
+            : false,
+          externalLineagesHaveDifferentIdentities: firstExternalIdentity && secondExternalIdentity
+            ? !sameFileIdentity(firstExternalIdentity, secondExternalIdentity)
+            : false,
+          entries: (await readdir(scratch)).sort(),
+          artifactEntries: (await readdir(operationDirectory)).sort(),
+        },
+        {
+          scenario: scenario.name,
+          rejection: {
+            aggregate: true,
+            message: `${file} write failed and operation-owned artifacts could not be recovered`,
+            causes: [
+              `${file} changed while the configurator was open; reload and retry`,
+              `${file} recovery found another concurrent edit; preserving ${recovery}`,
+            ],
+          },
+          hookOccurrences: {
+            "temporary-open": 1,
+            "temporary-write": 1,
+            "temporary-flush": 1,
+            rename: 1,
+            "destination-flush": 1,
+            "post-validate": 1,
+            "recovery-restore": 1,
+            "ownership-release": 0,
+          },
+          firstBytesAtCheckpoint: LATE_EDIT_BYTES,
+          destinationAbsentBeforeSecondEdit: true,
+          secondBytesAtCheckpoint: scenario.secondBytes,
+          destinationBytes: scenario.secondBytes,
+          destinationMode: scenario.secondMode,
+          destinationIdentityPreserved: true,
+          recoveryBytes: LATE_EDIT_BYTES,
+          recoveryMode: FOREIGN_ARTIFACT_MODE,
+          recoveryIdentityPreserved: true,
+          externalLineagesHaveDifferentIdentities: true,
+          entries: [CONFIG_FILE_NAME, path.basename(operationDirectory)].sort(),
+          artifactEntries: [CONFIG_WRITE_RECOVERY_NAME],
+        },
+      )
+    } finally {
+      await rm(scratch, { recursive: true, force: true })
+    }
+  }
+  pass("shouldPreserveEveryExternalLineageWhenRecoveryFindsSecondEdit")
+}
+
+async function shouldAggregatePersistenceFailureBeforeRecoveryConflict(): Promise<void> {
+  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-persistence."))
+  try {
+    // Given
+    const file = path.join(scratch, CONFIG_FILE_NAME)
+    await writeFile(file, CONFIG_BEFORE_BYTES, { mode: CONFIG_FILE_MODE })
+    const snapshot = await readConfigSnapshot(file)
+    const hookOccurrences = persistenceHookCounts()
+    let externalIdentityAtCheckpoint: Awaited<ReturnType<typeof stat>> | undefined
+    let destinationBytesAtCheckpoint: Buffer | undefined
+    let failure: unknown
+
+    // When
+    try {
+      await writeConfigChanges(snapshot, fixtureChanges(), {
+        async before(step) {
+          hookOccurrences[step] += 1
+          if (step !== "post-validate") return
+          await rm(file)
+          await writeFile(file, LATE_EDIT_BYTES, { mode: FOREIGN_ARTIFACT_MODE })
+          externalIdentityAtCheckpoint = await stat(file)
+          destinationBytesAtCheckpoint = await readFile(file)
+          throw new Error(INJECTED_POST_VALIDATE_FAILURE)
+        },
+      })
+    } catch (error) {
+      failure = error
+    }
+
+    // Then
+    const finalDestinationIdentity = await stat(file)
+    assert.deepEqual(
+      {
+        rejection: {
+          aggregate: failure instanceof AggregateError,
+          message: failure instanceof Error ? failure.message : failure,
+          causes: failure instanceof AggregateError
+            ? failure.errors.map((error) => (error instanceof Error ? error.message : String(error)))
+            : [],
+        },
+        hookOccurrences,
+        destinationBytesAtCheckpoint,
+        destinationBytes: await readFile(file),
+        destinationMode: finalDestinationIdentity.mode & 0o777,
+        destinationIdentityPreserved: externalIdentityAtCheckpoint
+          ? sameFileIdentity(externalIdentityAtCheckpoint, finalDestinationIdentity)
+          : false,
+        entries: (await readdir(scratch)).sort(),
+      },
+      {
+        rejection: {
+          aggregate: true,
+          message: `${file} write failed after a concurrent ownership conflict`,
+          causes: [
+            INJECTED_POST_VALIDATE_FAILURE,
+            `${file} changed while the configurator was open; reload and retry`,
+          ],
+        },
+        hookOccurrences: {
+          "temporary-open": 1,
+          "temporary-write": 1,
+          "temporary-flush": 1,
+          rename: 1,
+          "destination-flush": 1,
+          "post-validate": 1,
+          "recovery-restore": 1,
+          "ownership-release": 0,
+        },
+        destinationBytesAtCheckpoint: LATE_EDIT_BYTES,
+        destinationBytes: LATE_EDIT_BYTES,
+        destinationMode: FOREIGN_ARTIFACT_MODE,
+        destinationIdentityPreserved: true,
+        entries: [CONFIG_FILE_NAME],
+      },
+    )
+    pass("shouldAggregatePersistenceFailureBeforeRecoveryConflict")
   } finally {
     await rm(scratch, { recursive: true, force: true })
   }
@@ -2890,6 +3326,8 @@ async function shouldRejectWithoutClobberWhenConcurrentEditPrecedesGlobalFallbac
           rename: 1,
           "destination-flush": 1,
           "post-validate": 1,
+          "recovery-restore": 0,
+          "ownership-release": 0,
         },
         bytes: GLOBAL_EXTERNAL_EDIT_BYTES,
         mode: CONFIG_FILE_MODE,
@@ -2987,6 +3425,8 @@ async function shouldRestoreHeldDescriptorEditWhenConcurrentEditPrecedesGlobalFa
             rename: 1,
             "destination-flush": 1,
             "post-validate": 1,
+            "recovery-restore": 0,
+            "ownership-release": 0,
           },
           bytes: GLOBAL_EXTERNAL_EDIT_BYTES,
           mode: CONFIG_FILE_MODE,
@@ -2994,6 +3434,122 @@ async function shouldRestoreHeldDescriptorEditWhenConcurrentEditPrecedesGlobalFa
         },
       )
       pass("shouldRestoreHeldDescriptorEditWhenConcurrentEditPrecedesGlobalFallback")
+    } finally {
+      await heldFile.close()
+    }
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+}
+
+async function shouldTransferFallbackOwnershipBeforeHeldClaimChanges(): Promise<void> {
+  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-hot-apply."))
+  try {
+    // Given
+    const file = path.join(scratch, CONFIG_FILE_NAME)
+    await writeFile(file, GLOBAL_CONFIG_BYTES, { mode: CONFIG_FILE_MODE })
+    const snapshot = await readConfigSnapshot(file)
+    const heldFile = await open(file, "r+")
+    try {
+      const originalMetadata = await heldFile.stat()
+      let patchCalls = 0
+      const client = {
+        global: {
+          config: {
+            update: async () => {
+              patchCalls += 1
+              return { error: { name: "BadRequest" }, response: { status: 400 } }
+            },
+          },
+        },
+      }
+      const runtime = { config: scratch, worktree: "/work/project", directory: "/work/project" }
+      const changes: AgentChange[] = [
+        { agent: "alpha", before: { model: "openai/old" }, after: { model: "openai/new" }, action: "set" },
+        { agent: "beta", before: { model: "anthropic/old" }, after: {}, action: "inherit" },
+      ]
+      const hookOccurrences = persistenceHookCounts()
+      let heldMutation = emptyHeldClaimMutationEvidence()
+      let fallbackIdentityAtCheckpoint: Awaited<ReturnType<typeof stat>> | undefined
+      let fallbackBytesAtCheckpoint: Buffer | undefined
+      let failure: unknown
+
+      // When
+      try {
+        await applyConfigChanges(client, "global", runtime, snapshot, changes, {
+          async before(step) {
+            hookOccurrences[step] += 1
+            if (step !== "ownership-release") return
+            fallbackIdentityAtCheckpoint = await stat(file)
+            fallbackBytesAtCheckpoint = await readFile(file)
+            heldMutation = await overwriteRetainedClaimThroughHandle(
+              scratch,
+              file,
+              heldFile,
+              originalMetadata,
+              GLOBAL_EXTERNAL_EDIT_BYTES,
+            )
+          },
+        })
+      } catch (error) {
+        failure = error
+      }
+
+      // Then
+      const finalDestinationIdentity = await stat(file)
+      assert.deepEqual(
+        {
+          rejection: {
+            aggregate: failure instanceof AggregateError,
+            message: failure instanceof Error ? failure.message : failure,
+            causes: failure instanceof AggregateError
+              ? failure.errors.map((error) => (error instanceof Error ? error.message : String(error)))
+              : [],
+          },
+          heldMutation,
+          patchCalls,
+          hookOccurrences,
+          fallbackBytesAtCheckpoint,
+          finalBytes: await readFile(file),
+          finalMode: finalDestinationIdentity.mode & 0o777,
+          finalIdentityIsHeldClaim: sameFileIdentity(originalMetadata, finalDestinationIdentity),
+          finalIdentityDiffersFromFallback: fallbackIdentityAtCheckpoint
+            ? !sameFileIdentity(fallbackIdentityAtCheckpoint, finalDestinationIdentity)
+            : false,
+          entries: (await readdir(scratch)).sort(),
+        },
+        {
+          rejection: {
+            aggregate: false,
+            message: `${file} changed while the configurator was open; reload and retry`,
+            causes: [],
+          },
+          heldMutation: {
+            descriptorKeptOriginalInode: true,
+            descriptorBecameRetainedClaim: true,
+            descriptorDetachedFromDestination: true,
+            destinationWasNotReplaced: true,
+          },
+          patchCalls: 1,
+          hookOccurrences: {
+            "temporary-open": 2,
+            "temporary-write": 2,
+            "temporary-flush": 2,
+            rename: 2,
+            "destination-flush": 2,
+            "post-validate": 2,
+            "recovery-restore": 0,
+            "ownership-release": 1,
+          },
+          fallbackBytesAtCheckpoint: GLOBAL_FALLBACK_BYTES,
+          finalBytes: GLOBAL_EXTERNAL_EDIT_BYTES,
+          finalMode: CONFIG_FILE_MODE,
+          finalIdentityIsHeldClaim: true,
+          finalIdentityDiffersFromFallback: true,
+          entries: [CONFIG_FILE_NAME],
+        },
+      )
+      pass("shouldTransferFallbackOwnershipBeforeHeldClaimChanges")
     } finally {
       await heldFile.close()
     }
@@ -3043,6 +3599,193 @@ async function shouldRestoreOriginalSnapshotWhenGlobalPatchAndFallbackFail(): Pr
       { content: original, entries: ["opencode.jsonc"] },
     )
     pass("shouldRestoreOriginalSnapshotWhenGlobalPatchAndFallbackFail")
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+}
+
+async function shouldKeepLivePublicationWhenRetainedClaimIsMissingDuringRollback(): Promise<void> {
+  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-hot-apply."))
+  try {
+    // Given
+    const file = path.join(scratch, CONFIG_FILE_NAME)
+    await writeFile(file, GLOBAL_CONFIG_BYTES, { mode: CONFIG_FILE_MODE })
+    const snapshot = await readConfigSnapshot(file)
+    const client = {
+      global: {
+        config: {
+          update: async () => ({ error: { name: "BadRequest" }, response: { status: 400 } }),
+        },
+      },
+    }
+    const runtime = { config: scratch, worktree: "/work/project", directory: "/work/project" }
+    const changes: AgentChange[] = [
+      { agent: "alpha", before: { model: "openai/old" }, after: { model: "openai/new" }, action: "set" },
+      { agent: "beta", before: { model: "anthropic/old" }, after: {}, action: "inherit" },
+    ]
+    const hookOccurrences = persistenceHookCounts()
+    let publicationIdentityAtCheckpoint: Awaited<ReturnType<typeof stat>> | undefined
+    let destinationBytesAtCheckpoint: Buffer | undefined
+    let failure: unknown
+
+    // When
+    try {
+      await applyConfigChanges(client, "global", runtime, snapshot, changes, {
+        async before(step) {
+          hookOccurrences[step] += 1
+          if (step !== "temporary-open" || hookOccurrences[step] !== 2) return
+          const operationDirectory = await configWriteDirectory(scratch)
+          await rm(path.join(operationDirectory, CONFIG_WRITE_CLAIM_NAME))
+          publicationIdentityAtCheckpoint = await stat(file)
+          destinationBytesAtCheckpoint = await readFile(file)
+          throw new Error(INJECTED_FALLBACK_FAILURE)
+        },
+      })
+    } catch (error) {
+      failure = error
+    }
+
+    // Then
+    const finalDestinationIdentity = await stat(file)
+    assert.deepEqual(
+      {
+        rejection: {
+          aggregate: failure instanceof AggregateError,
+          message: failure instanceof Error ? failure.message : failure,
+          causes: failure instanceof AggregateError
+            ? failure.errors.map((error) => (error instanceof Error ? error.message : String(error)))
+            : [],
+        },
+        hookOccurrences,
+        destinationBytesAtCheckpoint,
+        destinationBytes: await readFile(file),
+        destinationMode: finalDestinationIdentity.mode & 0o777,
+        publicationIdentityPreserved: publicationIdentityAtCheckpoint
+          ? sameFileIdentity(publicationIdentityAtCheckpoint, finalDestinationIdentity)
+          : false,
+        entries: (await readdir(scratch)).sort(),
+      },
+      {
+        rejection: {
+          aggregate: true,
+          message: `${file} apply failed and the original snapshot could not be restored`,
+          causes: [
+            INJECTED_FALLBACK_FAILURE,
+            `${file} rollback conflict: configuration changed after the plugin write; preserving newer content`,
+          ],
+        },
+        hookOccurrences: {
+          "temporary-open": 2,
+          "temporary-write": 1,
+          "temporary-flush": 1,
+          rename: 1,
+          "destination-flush": 1,
+          "post-validate": 1,
+          "recovery-restore": 0,
+          "ownership-release": 0,
+        },
+        destinationBytesAtCheckpoint: GLOBAL_PRELUDE_BYTES,
+        destinationBytes: GLOBAL_PRELUDE_BYTES,
+        destinationMode: CONFIG_FILE_MODE,
+        publicationIdentityPreserved: true,
+        entries: [CONFIG_FILE_NAME],
+      },
+    )
+    pass("shouldKeepLivePublicationWhenRetainedClaimIsMissingDuringRollback")
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+}
+
+async function shouldKeepLivePublicationWhenRetainedClaimDisappearsBeforeRelease(): Promise<void> {
+  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-hot-apply."))
+  try {
+    // Given
+    const file = path.join(scratch, CONFIG_FILE_NAME)
+    await writeFile(file, GLOBAL_CONFIG_BYTES, { mode: CONFIG_FILE_MODE })
+    const snapshot = await readConfigSnapshot(file)
+    let patchCalls = 0
+    let publicationIdentityAtCheckpoint: Awaited<ReturnType<typeof stat>> | undefined
+    let destinationBytesAtCheckpoint: Buffer | undefined
+    const client = {
+      global: {
+        config: {
+          update: async () => {
+            patchCalls += 1
+            const operationDirectory = await configWriteDirectory(scratch)
+            await rm(path.join(operationDirectory, CONFIG_WRITE_CLAIM_NAME))
+            publicationIdentityAtCheckpoint = await stat(file)
+            destinationBytesAtCheckpoint = await readFile(file)
+            return { data: {} }
+          },
+        },
+      },
+    }
+    const runtime = { config: scratch, worktree: "/work/project", directory: "/work/project" }
+    const changes: AgentChange[] = [
+      { agent: "alpha", before: { model: "openai/old" }, after: { model: "openai/new" }, action: "set" },
+      { agent: "beta", before: { model: "anthropic/old" }, after: {}, action: "inherit" },
+    ]
+    const hookOccurrences = persistenceHookCounts()
+    let failure: unknown
+
+    // When
+    try {
+      await applyConfigChanges(client, "global", runtime, snapshot, changes, {
+        before(step) {
+          hookOccurrences[step] += 1
+        },
+      })
+    } catch (error) {
+      failure = error
+    }
+
+    // Then
+    const finalDestinationIdentity = await stat(file)
+    assert.deepEqual(
+      {
+        rejection: {
+          aggregate: failure instanceof AggregateError,
+          message: failure instanceof Error ? failure.message : failure,
+          causes: failure instanceof AggregateError
+            ? failure.errors.map((error) => (error instanceof Error ? error.message : String(error)))
+            : [],
+        },
+        patchCalls,
+        hookOccurrences,
+        destinationBytesAtCheckpoint,
+        destinationBytes: await readFile(file),
+        destinationMode: finalDestinationIdentity.mode & 0o777,
+        publicationIdentityPreserved: publicationIdentityAtCheckpoint
+          ? sameFileIdentity(publicationIdentityAtCheckpoint, finalDestinationIdentity)
+          : false,
+        entries: (await readdir(scratch)).sort(),
+      },
+      {
+        rejection: {
+          aggregate: false,
+          message: `${file} changed while the configurator was open; reload and retry`,
+          causes: [],
+        },
+        patchCalls: 1,
+        hookOccurrences: {
+          "temporary-open": 1,
+          "temporary-write": 1,
+          "temporary-flush": 1,
+          rename: 1,
+          "destination-flush": 1,
+          "post-validate": 1,
+          "recovery-restore": 0,
+          "ownership-release": 0,
+        },
+        destinationBytesAtCheckpoint: GLOBAL_PRELUDE_BYTES,
+        destinationBytes: GLOBAL_PRELUDE_BYTES,
+        destinationMode: CONFIG_FILE_MODE,
+        publicationIdentityPreserved: true,
+        entries: [CONFIG_FILE_NAME],
+      },
+    )
+    pass("shouldKeepLivePublicationWhenRetainedClaimDisappearsBeforeRelease")
   } finally {
     await rm(scratch, { recursive: true, force: true })
   }
@@ -3121,6 +3864,8 @@ async function shouldPreserveConcurrentEditWhenGlobalRollbackConflicts(): Promis
           rename: 1,
           "destination-flush": 1,
           "post-validate": 1,
+          "recovery-restore": 0,
+          "ownership-release": 0,
         },
         bytes: GLOBAL_EXTERNAL_EDIT_BYTES,
         mode: CONFIG_FILE_MODE,
@@ -3223,6 +3968,8 @@ async function shouldRestoreHeldDescriptorEditWhenGlobalRollbackFindsMutatedClai
             rename: 1,
             "destination-flush": 1,
             "post-validate": 1,
+            "recovery-restore": 0,
+            "ownership-release": 0,
           },
           bytes: GLOBAL_EXTERNAL_EDIT_BYTES,
           mode: CONFIG_FILE_MODE,
@@ -3545,7 +4292,15 @@ function persistenceHookCounts(): Record<PersistenceStep, number> {
     rename: 0,
     "destination-flush": 0,
     "post-validate": 0,
+    "recovery-restore": 0,
+    "ownership-release": 0,
   }
+}
+
+async function configWriteDirectory(directory: string): Promise<string> {
+  const operationDirectory = (await readdir(directory)).find((entry) => entry.endsWith(CONFIG_WRITE_DIRECTORY_SUFFIX))
+  if (!operationDirectory) throw new Error(`Expected retained write ownership in ${directory}`)
+  return path.join(directory, operationDirectory)
 }
 
 function emptyHeldClaimMutationEvidence(): Record<
@@ -3625,6 +4380,11 @@ await shouldWriteWithoutBackupAndPreserveModeWhenWriteSucceeds()
 await shouldRejectConcurrentEditBeforeWriting()
 await shouldRestoreOriginalWhenInjectedPersistenceStepFails()
 await shouldPreserveLateConcurrentEditWhenFinalPublicationLosesOwnership()
+await shouldRejectIdenticalStateDifferentInodeAtClaimCheckpoint()
+await shouldPreserveForeignClaimWhenNoClobberReservationCollides()
+await shouldPreserveForeignRecoveryWhenNoClobberReservationCollides()
+await shouldPreserveEveryExternalLineageWhenRecoveryFindsSecondEdit()
+await shouldAggregatePersistenceFailureBeforeRecoveryConflict()
 await shouldCompleteStagedWizardAndPersistSelectedChanges()
 await shouldKeepCoreConfigurationUsableWhenPresetStorageIsUnavailable()
 await shouldKeepCoreConfigurationUsableWhenPresetStorageIsUnreadable()
@@ -3677,7 +4437,10 @@ await shouldHotApplyGlobalScopeViaConfigPatchAfterLocalDeletions()
 await shouldFallBackToLocalWriteWhenGlobalPatchFails()
 await shouldRejectWithoutClobberWhenConcurrentEditPrecedesGlobalFallback()
 await shouldRestoreHeldDescriptorEditWhenConcurrentEditPrecedesGlobalFallback()
+await shouldTransferFallbackOwnershipBeforeHeldClaimChanges()
 await shouldRestoreOriginalSnapshotWhenGlobalPatchAndFallbackFail()
+await shouldKeepLivePublicationWhenRetainedClaimIsMissingDuringRollback()
+await shouldKeepLivePublicationWhenRetainedClaimDisappearsBeforeRelease()
 await shouldPreserveConcurrentEditWhenGlobalRollbackConflicts()
 await shouldRestoreHeldDescriptorEditWhenGlobalRollbackFindsMutatedClaim()
 await shouldReportRestartFallbackWhenClientLacksHotApplyRoutes()

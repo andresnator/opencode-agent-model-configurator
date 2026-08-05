@@ -16,7 +16,7 @@ export type ConfigSnapshot = {
 export type WriteResult = {
     file: string;
 };
-export type PersistenceStep = "temporary-open" | "temporary-write" | "temporary-flush" | "rename" | "destination-flush" | "post-validate";
+export type PersistenceStep = "temporary-open" | "temporary-write" | "temporary-flush" | "rename" | "destination-flush" | "post-validate" | "recovery-restore" | "ownership-release";
 export type PersistenceHooks = {
     before?: (step: PersistenceStep) => void | Promise<void>;
 };
@@ -24,13 +24,24 @@ type WriteArtifacts = {
     directory: string;
     temporary: string;
     claim: string;
+    restoration: string;
     recovery: string;
+};
+type FileIdentity = {
+    dev: number;
+    ino: number;
+};
+type WriteArtifactName = keyof WriteArtifacts;
+type WriteArtifactOwnership = {
+    identities: Partial<Record<WriteArtifactName, FileIdentity>>;
+    preserved: Set<WriteArtifactName>;
 };
 type ConfigWriteOwnershipState = {
     snapshot: ConfigSnapshot;
     content: string;
     mode: number;
     artifacts: WriteArtifacts;
+    artifactOwnership: WriteArtifactOwnership;
     active: boolean;
 };
 export type ConfigWriteOwnership = {
