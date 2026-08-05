@@ -48,10 +48,18 @@ import type {
 
 const ROOT = path.resolve(import.meta.dirname, "..")
 const FIXTURES = path.join(ROOT, "tests", "fixtures")
+const CONFIG_FILE_NAME = "opencode.jsonc"
+const CONFIG_FILE_MODE = 0o640
+const CONFIG_BEFORE_BYTES = await readFile(path.join(FIXTURES, "config-before.jsonc"))
+const CONFIG_AFTER_BYTES = await readFile(path.join(FIXTURES, "config-after.jsonc"))
+const LATE_EDIT_BYTES = Buffer.from('{\n  "external": true\n}\n')
+const FIRST_CONFIG_CHANGES: readonly AgentChange[] = [
+  { agent: "alpha", before: {}, after: { model: "openai/new" }, action: "set" },
+]
 const PROFILE_EXAMPLE_FILE = path.join(ROOT, "examples", "profiles", "team.example.json")
 const PROFILE_SCHEMA_FILE = path.join(ROOT, "schemas", "profile.schema.json")
 const PROFILE_SCHEMA_REFERENCE_KEY = "$schema"
-const EXPECTED_FAILURE_STEPS: PersistenceStep[] = [
+const PERSISTENCE_STEPS: PersistenceStep[] = [
   "temporary-open",
   "temporary-write",
   "temporary-flush",
@@ -278,19 +286,35 @@ async function shouldWriteWithoutBackupAndPreserveModeWhenWriteSucceeds(): Promi
   const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-persistence."))
   try {
     // Given
-    const file = path.join(scratch, "opencode.jsonc")
-    const original = await readFile(path.join(FIXTURES, "config-before.jsonc"), "utf8")
-    await writeFile(file, original, { mode: 0o640 })
+    const file = path.join(scratch, CONFIG_FILE_NAME)
+    await writeFile(file, CONFIG_BEFORE_BYTES, { mode: CONFIG_FILE_MODE })
     const snapshot = await readConfigSnapshot(file)
+    const completedSteps: PersistenceStep[] = []
 
     // When
-    const result = await writeConfigChanges(snapshot, fixtureChanges())
+    const result = await writeConfigChanges(snapshot, fixtureChanges(), {
+      before(step) {
+        completedSteps.push(step)
+      },
+    })
 
     // Then
-    assert.equal(result.file, file)
-    assert.equal(await readFile(file, "utf8"), await readFile(path.join(FIXTURES, "config-after.jsonc"), "utf8"))
-    assert.equal((await stat(file)).mode & 0o777, 0o640)
-    assert.deepEqual((await readdir(scratch)).sort(), ["opencode.jsonc"])
+    assert.deepEqual(
+      {
+        result,
+        bytes: await readFile(file),
+        mode: (await stat(file)).mode & 0o777,
+        entries: (await readdir(scratch)).sort(),
+        completedSteps,
+      },
+      {
+        result: { file },
+        bytes: CONFIG_AFTER_BYTES,
+        mode: CONFIG_FILE_MODE,
+        entries: [CONFIG_FILE_NAME],
+        completedSteps: PERSISTENCE_STEPS,
+      },
+    )
     pass("shouldWriteWithoutBackupAndPreserveModeWhenWriteSucceeds")
   } finally {
     await rm(scratch, { recursive: true, force: true })
@@ -320,34 +344,101 @@ async function shouldRejectConcurrentEditBeforeWriting(): Promise<void> {
 }
 
 async function shouldRestoreOriginalWhenInjectedPersistenceStepFails(): Promise<void> {
-  for (const failureStep of EXPECTED_FAILURE_STEPS) {
-    const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-persistence."))
-    try {
-      // Given
-      const file = path.join(scratch, "opencode.jsonc")
-      const original = await readFile(path.join(FIXTURES, "config-before.jsonc"), "utf8")
-      await writeFile(file, original, { mode: 0o600 })
-      const snapshot = await readConfigSnapshot(file)
+  for (const destinationState of ["existing", "absent"] as const) {
+    for (const failureStep of PERSISTENCE_STEPS) {
+      const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-persistence."))
+      try {
+        // Given
+        const file = path.join(scratch, CONFIG_FILE_NAME)
+        if (destinationState === "existing") {
+          await writeFile(file, CONFIG_BEFORE_BYTES, { mode: CONFIG_FILE_MODE })
+        }
+        const snapshot = await readConfigSnapshot(file)
+        const changes = destinationState === "existing" ? fixtureChanges() : FIRST_CONFIG_CHANGES
+        let failure: unknown
 
-      // When
-      await assert.rejects(
-        () =>
-          writeConfigChanges(snapshot, fixtureChanges(), {
+        // When
+        try {
+          await writeConfigChanges(snapshot, changes, {
             before(step) {
               if (step === failureStep) throw new Error(`injected ${step}`)
             },
-          }),
-        new RegExp(`injected ${failureStep}`),
-      )
+          })
+        } catch (error) {
+          failure = error
+        }
 
-      // Then
-      assert.equal(await readFile(file, "utf8"), original, `destination changed after ${failureStep}`)
-      assert.equal((await readdir(scratch)).some((entry) => entry.endsWith(".tmp")), false, `temp remains after ${failureStep}`)
-    } finally {
-      await rm(scratch, { recursive: true, force: true })
+        // Then
+        const destinationBytes = await readFile(file).catch((error: NodeJS.ErrnoException) => {
+          if (error.code === "ENOENT") return undefined
+          throw error
+        })
+        assert.deepEqual(
+          {
+            failure: failure instanceof Error ? failure.message : failure,
+            destinationBytes,
+            destinationMode: destinationState === "existing" ? (await stat(file)).mode & 0o777 : undefined,
+            entries: (await readdir(scratch)).sort(),
+          },
+          {
+            failure: `injected ${failureStep}`,
+            destinationBytes: destinationState === "existing" ? CONFIG_BEFORE_BYTES : undefined,
+            destinationMode: destinationState === "existing" ? CONFIG_FILE_MODE : undefined,
+            entries: destinationState === "existing" ? [CONFIG_FILE_NAME] : [],
+          },
+        )
+      } finally {
+        await rm(scratch, { recursive: true, force: true })
+      }
     }
   }
   pass("shouldRestoreOriginalWhenInjectedPersistenceStepFails")
+}
+
+async function shouldPreserveLateConcurrentEditWhenFinalPublicationLosesOwnership(): Promise<void> {
+  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-persistence."))
+  try {
+    // Given
+    const file = path.join(scratch, CONFIG_FILE_NAME)
+    await writeFile(file, CONFIG_BEFORE_BYTES, { mode: CONFIG_FILE_MODE })
+    const snapshot = await readConfigSnapshot(file)
+    let lateEditCount = 0
+    let failure: unknown
+
+    // When
+    try {
+      await writeConfigChanges(snapshot, fixtureChanges(), {
+        async before(step) {
+          if (step !== "rename") return
+          lateEditCount += 1
+          await writeFile(file, LATE_EDIT_BYTES)
+        },
+      })
+    } catch (error) {
+      failure = error
+    }
+
+    // Then
+    assert.deepEqual(
+      {
+        failure: failure instanceof Error ? failure.message : failure,
+        lateEditCount,
+        bytes: await readFile(file),
+        mode: (await stat(file)).mode & 0o777,
+        entries: (await readdir(scratch)).sort(),
+      },
+      {
+        failure: `${file} changed while the configurator was open; reload and retry`,
+        lateEditCount: 1,
+        bytes: LATE_EDIT_BYTES,
+        mode: CONFIG_FILE_MODE,
+        entries: [CONFIG_FILE_NAME],
+      },
+    )
+    pass("shouldPreserveLateConcurrentEditWhenFinalPublicationLosesOwnership")
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
 }
 
 async function shouldCompleteStagedWizardAndPersistSelectedChanges(): Promise<void> {
@@ -3154,6 +3245,7 @@ await shouldPreserveForeignJsoncWhenRenderingAssignmentChanges()
 await shouldWriteWithoutBackupAndPreserveModeWhenWriteSucceeds()
 await shouldRejectConcurrentEditBeforeWriting()
 await shouldRestoreOriginalWhenInjectedPersistenceStepFails()
+await shouldPreserveLateConcurrentEditWhenFinalPublicationLosesOwnership()
 await shouldCompleteStagedWizardAndPersistSelectedChanges()
 await shouldKeepCoreConfigurationUsableWhenPresetStorageIsUnavailable()
 await shouldKeepCoreConfigurationUsableWhenPresetStorageIsUnreadable()

@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto"
-import { mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises"
+import { link, mkdir, open, readFile, rename, rm, stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import path from "node:path"
 import { applyEdits, modify, parse, type FormattingOptions, type ParseError, printParseErrorCode } from "jsonc-parser"
@@ -8,6 +8,7 @@ import type { AgentChange, AgentMapping } from "./domain"
 const CONFIG_JSON = "opencode.json"
 const CONFIG_JSONC = "opencode.jsonc"
 const DEFAULT_FILE_MODE = 0o600
+const PRIVATE_DIRECTORY_MODE = 0o700
 const FORMATTING_OPTIONS: FormattingOptions = { insertSpaces: true, tabSize: 2, eol: "\n" }
 
 export type ConfigScope = "global" | "project"
@@ -41,6 +42,21 @@ export type PersistenceStep =
 export type PersistenceHooks = {
   before?: (step: PersistenceStep) => void | Promise<void>
 }
+
+type WriteArtifacts = {
+  directory: string
+  temporary: string
+  claim: string
+  recovery: string
+}
+
+type WriteState = {
+  destinationClaimed: boolean
+  claimMatchesSnapshot: boolean
+  destinationPublished: boolean
+}
+
+class ConfigWriteConflictError extends Error {}
 
 export async function resolveConfigFile(scope: ConfigScope, runtime: RuntimePaths): Promise<string> {
   const root = scope === "global" ? globalConfigRoot(runtime) : projectConfigRoot(runtime)
@@ -120,54 +136,199 @@ async function writeConfigContent(
   hooks: PersistenceHooks = {},
   conflictMessage?: string,
 ): Promise<WriteResult> {
-  await mkdir(path.dirname(snapshot.file), { recursive: true, mode: 0o700 })
+  const directory = path.dirname(snapshot.file)
+  await mkdir(directory, { recursive: true, mode: PRIVATE_DIRECTORY_MODE })
   if (snapshot.exists) {
     let current: string
     try {
       current = await readFile(snapshot.file, "utf8")
     } catch (error) {
-      if (conflictMessage && isMissing(error)) throw new Error(conflictMessage)
+      if (isMissing(error)) throw configWriteConflict(snapshot, conflictMessage)
       throw error
     }
     if (current !== snapshot.content) {
-      throw new Error(conflictMessage ?? `${snapshot.file} changed while the configurator was open; reload and retry`)
+      throw configWriteConflict(snapshot, conflictMessage)
     }
   } else if (await exists(snapshot.file)) {
-    throw new Error(`${snapshot.file} was created while the configurator was open; reload and retry`)
+    throw configWriteConflict(snapshot, conflictMessage)
   }
 
   const suffix = `${timestamp()}-${randomBytes(3).toString("hex")}`
-  const temporary = `${snapshot.file}.${suffix}.tmp`
+  const operationDirectory = `${snapshot.file}.${suffix}.write`
+  const artifacts: WriteArtifacts = {
+    directory: operationDirectory,
+    temporary: path.join(operationDirectory, "temporary"),
+    claim: path.join(operationDirectory, "claim"),
+    recovery: path.join(operationDirectory, "recovery"),
+  }
+  const state: WriteState = {
+    destinationClaimed: false,
+    claimMatchesSnapshot: false,
+    destinationPublished: false,
+  }
+  const mode = snapshot.mode
+  let artifactsOwned = false
 
   try {
     await hooks.before?.("temporary-open")
-    const handle = await open(temporary, "wx", snapshot.mode || DEFAULT_FILE_MODE)
+    // The exclusive sibling directory makes every path below it operation-owned.
+    await mkdir(artifacts.directory, { mode: PRIVATE_DIRECTORY_MODE })
+    artifactsOwned = true
+    const handle = await open(artifacts.temporary, "wx", mode)
     try {
       await hooks.before?.("temporary-write")
       await handle.writeFile(rendered, "utf8")
       await hooks.before?.("temporary-flush")
+      await handle.chmod(mode)
       await handle.sync()
     } finally {
       await handle.close()
     }
     await hooks.before?.("rename")
-    await rename(temporary, snapshot.file)
-    await chmodFile(snapshot.file, snapshot.mode || DEFAULT_FILE_MODE)
+    if (snapshot.exists) {
+      try {
+        await rename(snapshot.file, artifacts.claim)
+      } catch (error) {
+        if (isMissing(error)) throw configWriteConflict(snapshot, conflictMessage)
+        throw error
+      }
+      state.destinationClaimed = true
+      state.claimMatchesSnapshot = await matchesSnapshot(artifacts.claim, snapshot, mode)
+      if (!state.claimMatchesSnapshot) throw configWriteConflict(snapshot, conflictMessage)
+    }
+    try {
+      // A hard link publishes the complete flushed inode without clobbering a late writer.
+      await link(artifacts.temporary, snapshot.file)
+    } catch (error) {
+      if (isAlreadyPresent(error)) throw configWriteConflict(snapshot, conflictMessage)
+      throw error
+    }
+    state.destinationPublished = true
     await hooks.before?.("destination-flush")
-    await syncFile(snapshot.file)
-    await syncDirectory(path.dirname(snapshot.file))
+    await syncFile(artifacts.temporary)
+    await syncDirectory(directory)
 
     await hooks.before?.("post-validate")
-    const persisted = await readFile(snapshot.file, "utf8")
+    const persisted = await readFile(artifacts.temporary, "utf8")
     parseConfig(persisted, snapshot.file)
     if (persisted !== rendered) throw new Error(`${snapshot.file} did not persist the expected content`)
+    if (!(await isOwnedPublication(artifacts.temporary, snapshot.file, rendered, mode))) {
+      throw configWriteConflict(snapshot, conflictMessage)
+    }
+    if (state.destinationClaimed) {
+      state.claimMatchesSnapshot = false
+      state.claimMatchesSnapshot = await matchesSnapshot(artifacts.claim, snapshot, mode)
+      if (!state.claimMatchesSnapshot) throw configWriteConflict(snapshot, conflictMessage)
+    }
+    await rm(artifacts.directory, { recursive: true })
+    artifactsOwned = false
+    await syncDirectory(directory)
     return { file: snapshot.file }
   } catch (error) {
-    await rm(temporary, { force: true }).catch(() => undefined)
-    if (snapshot.exists) await writeFile(snapshot.file, snapshot.content, { mode: snapshot.mode }).catch(() => undefined)
-    else await rm(snapshot.file, { force: true }).catch(() => undefined)
+    if (!artifactsOwned) throw error
+    let ownershipLost: boolean
+    try {
+      ownershipLost = await recoverConfigWrite(snapshot, rendered, mode, artifacts, state)
+      await rm(artifacts.directory, { recursive: true })
+      artifactsOwned = false
+      await syncDirectory(directory)
+    } catch (recoveryError) {
+      throw new AggregateError(
+        [error, recoveryError],
+        `${snapshot.file} write failed and operation-owned artifacts could not be recovered`,
+      )
+    }
+    if (ownershipLost && !(error instanceof ConfigWriteConflictError)) {
+      throw configWriteConflict(snapshot, conflictMessage)
+    }
     throw error
   }
+}
+
+async function recoverConfigWrite(
+  snapshot: ConfigSnapshot,
+  rendered: string,
+  mode: number,
+  artifacts: WriteArtifacts,
+  state: WriteState,
+): Promise<boolean> {
+  if (state.destinationPublished) {
+    try {
+      await rename(snapshot.file, artifacts.recovery)
+    } catch (error) {
+      if (isMissing(error)) return true
+      throw error
+    }
+    if (!(await isOwnedPublication(artifacts.temporary, artifacts.recovery, rendered, mode))) {
+      await restoreWithoutClobber(artifacts.recovery, snapshot.file, true)
+      return true
+    }
+  }
+
+  if (!state.destinationClaimed) return false
+  const restored = await restoreWithoutClobber(
+    artifacts.claim,
+    snapshot.file,
+    !state.claimMatchesSnapshot,
+  )
+  return !state.claimMatchesSnapshot || !restored
+}
+
+async function restoreWithoutClobber(source: string, destination: string, sourceIsExternal: boolean): Promise<boolean> {
+  try {
+    await link(source, destination)
+    return true
+  } catch (error) {
+    if (!isAlreadyPresent(error)) throw error
+    if (sourceIsExternal && !(await haveSameState(source, destination))) {
+      throw new Error(`${destination} recovery found multiple concurrent edits; preserving both paths`)
+    }
+    return false
+  }
+}
+
+async function isOwnedPublication(
+  temporary: string,
+  destination: string,
+  rendered: string,
+  mode: number,
+): Promise<boolean> {
+  const [temporaryMetadata, destinationMetadata, content] = await Promise.all([
+    stat(temporary),
+    stat(destination),
+    readFile(temporary, "utf8"),
+  ])
+  return (
+    temporaryMetadata.dev === destinationMetadata.dev &&
+    temporaryMetadata.ino === destinationMetadata.ino &&
+    (destinationMetadata.mode & 0o777) === mode &&
+    content === rendered
+  )
+}
+
+async function matchesSnapshot(file: string, snapshot: ConfigSnapshot, mode: number): Promise<boolean> {
+  const [content, metadata] = await Promise.all([readFile(file, "utf8"), stat(file)])
+  return content === snapshot.content && (metadata.mode & 0o777) === mode
+}
+
+async function haveSameState(left: string, right: string): Promise<boolean> {
+  const [leftMetadata, rightMetadata, leftBytes, rightBytes] = await Promise.all([
+    stat(left),
+    stat(right),
+    readFile(left),
+    readFile(right),
+  ])
+  return (
+    (leftMetadata.mode & 0o777) === (rightMetadata.mode & 0o777) &&
+    leftBytes.equals(rightBytes)
+  )
+}
+
+function configWriteConflict(snapshot: ConfigSnapshot, message?: string): ConfigWriteConflictError {
+  const defaultMessage = snapshot.exists
+    ? `${snapshot.file} changed while the configurator was open; reload and retry`
+    : `${snapshot.file} was created while the configurator was open; reload and retry`
+  return new ConfigWriteConflictError(message ?? defaultMessage)
 }
 
 export function higherPrecedenceWarning(): string | undefined {
@@ -236,15 +397,6 @@ async function exists(file: string): Promise<boolean> {
   }
 }
 
-async function chmodFile(file: string, mode: number): Promise<void> {
-  const handle = await open(file, "r+")
-  try {
-    await handle.chmod(mode)
-  } finally {
-    await handle.close()
-  }
-}
-
 async function syncFile(file: string): Promise<void> {
   const handle = await open(file, "r")
   try {
@@ -273,4 +425,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isMissing(error: unknown): boolean {
   return isRecord(error) && error.code === "ENOENT"
+}
+
+function isAlreadyPresent(error: unknown): boolean {
+  return isRecord(error) && error.code === "EEXIST"
 }
