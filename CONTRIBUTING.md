@@ -20,7 +20,7 @@ Do not replace the lockfile or rewrite it with another package manager.
 
 ## Load the development checkout
 
-To exercise a change in OpenCode, follow the README's [local-loading path](README.md#quick-path) with the checkout under test. The README owns the registration command. Keep the checkout at the registered path and restart OpenCode before manual verification.
+To exercise a change in OpenCode, follow the README's [existing-checkout loading route](README.md#load-an-existing-checkout) with the checkout under test. The README owns the registration command. Keep the checkout at the registered path and restart OpenCode before manual verification.
 
 ## Make a focused change
 

@@ -92,6 +92,26 @@ export async function writeConfigChanges(
   const rendered = renderConfigChanges(snapshot, changes)
   if (rendered === snapshot.content) return { file: snapshot.file }
 
+  return writeConfigContent(snapshot, rendered, hooks)
+}
+
+export async function restoreConfigSnapshot(snapshot: ConfigSnapshot): Promise<void> {
+  const current = await readConfigSnapshot(snapshot.file)
+  if (!snapshot.exists) {
+    if (!current.exists) return
+    await rm(snapshot.file)
+    await syncDirectory(path.dirname(snapshot.file))
+    return
+  }
+
+  await writeConfigContent({ ...current, mode: snapshot.mode }, snapshot.content)
+}
+
+async function writeConfigContent(
+  snapshot: ConfigSnapshot,
+  rendered: string,
+  hooks: PersistenceHooks = {},
+): Promise<WriteResult> {
   await mkdir(path.dirname(snapshot.file), { recursive: true, mode: 0o700 })
   if (snapshot.exists) {
     const current = await readFile(snapshot.file, "utf8")

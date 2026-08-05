@@ -530,13 +530,6 @@ async function runReviewStep(api: TuiPluginApi, state: WizardState): Promise<Ste
     return "back"
   }
 
-  const refreshedModels = flattenModels(await loadCatalog(api))
-  const stale = findStaleSelections(decisions, refreshedModels)
-  if (stale.length > 0) {
-    api.ui.toast({ variant: "warning", message: `Selections changed in the live catalog: ${stale.join(", ")}. Reopen and select again.` })
-    return "exit"
-  }
-
   const warning = higherPrecedenceWarning()
   const categoryOf = reviewCategories(state.agents)
   const rows = [...changes].sort(
@@ -576,6 +569,13 @@ async function runReviewStep(api: TuiPluginApi, state: WizardState): Promise<Ste
   if (choice === APPLY_SAVE) {
     presetName = await promptPresetName(api, state)
     if (presetName === undefined) return "back"
+  }
+
+  const refreshedModels = flattenModels(await loadCatalog(api))
+  const stale = findStaleSelections(decisions, refreshedModels)
+  if (stale.length > 0) {
+    api.ui.toast({ variant: "warning", message: `Selections changed in the live catalog: ${stale.join(", ")}. Reopen and select again.` })
+    return "exit"
   }
 
   const result = await applyConfigChanges(api.client, state.scope!, api.state.path, snapshot, changes)

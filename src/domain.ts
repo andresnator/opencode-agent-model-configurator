@@ -105,8 +105,9 @@ export async function resolveProfilesRoot(
   if (configuredProfilesDir) {
     if (configuredProfilesDir.startsWith("file://")) return fileURLToPath(configuredProfilesDir)
     if (configuredProfilesDir === "~") return homedir()
-    if (configuredProfilesDir.startsWith(`~${path.sep}`)) {
-      return path.join(homedir(), configuredProfilesDir.slice(2))
+    const tildePath = configuredProfilesDir.match(/^~[\\/](.*)$/)
+    if (tildePath) {
+      return path.join(homedir(), ...tildePath[1].split(/[\\/]/))
     }
     return path.resolve(baseDirectory, configuredProfilesDir)
   }

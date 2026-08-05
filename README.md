@@ -22,6 +22,10 @@ This is the temporary distribution route: the plugin is not available on npm, so
 5. Keep the cloned directory at that path and restart OpenCode.
 6. Press `Ctrl+P` and choose **Configure agent models**, or run `/model-configurator`. Success means **Configure agent models** is available and the configurator opens.
 
+### Load an existing checkout
+
+To exercise code already checked out for development, start at that checkout's repository root, use the registration action in step 4, then follow steps 5–6. This route does not clone or switch the checkout revision.
+
 ## Configuration flow
 
 1. Choose project or global scope.

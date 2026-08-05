@@ -1,9 +1,11 @@
 import type { AgentChange } from "./domain"
 import {
   readConfigSnapshot,
+  restoreConfigSnapshot,
   writeConfigChanges,
   type ConfigScope,
   type ConfigSnapshot,
+  type PersistenceHooks,
   type RuntimePaths,
 } from "./persistence"
 
@@ -58,26 +60,42 @@ export async function applyConfigChanges(
   runtime: RuntimePaths,
   snapshot: ConfigSnapshot,
   changes: readonly AgentChange[],
+  hooks: PersistenceHooks = {},
 ): Promise<ApplyOutcome> {
   if (scope === "project") {
-    const result = await writeConfigChanges(snapshot, changes)
+    const result = await writeConfigChanges(snapshot, changes, hooks)
     const hot = await disposeProjectInstance(client, runtime)
     return outcome(result.file, hot)
   }
 
   const plan = planGlobalHotApply(changes)
   if (plan.strategy === "write-only") {
-    const result = await writeConfigChanges(snapshot, changes)
+    const result = await writeConfigChanges(snapshot, changes, hooks)
     return { file: result.file, hotApplied: false, detail: plan.reason }
   }
 
-  await writeConfigChanges(snapshot, plan.preludeChanges)
-  const hot = await patchGlobalConfig(client, plan.patch)
-  if (hot.applied) return { file: snapshot.file, hotApplied: true }
+  let preludeWritten = false
+  try {
+    await writeConfigChanges(snapshot, plan.preludeChanges, hooks)
+    preludeWritten = true
+    const hot = await patchGlobalConfig(client, plan.patch)
+    if (hot.applied) return { file: snapshot.file, hotApplied: true }
 
-  const fresh = await readConfigSnapshot(snapshot.file)
-  const result = await writeConfigChanges(fresh, plan.fallbackChanges)
-  return outcome(result.file, hot)
+    const fresh = await readConfigSnapshot(snapshot.file)
+    const result = await writeConfigChanges(fresh, plan.fallbackChanges, hooks)
+    return outcome(result.file, hot)
+  } catch (error) {
+    if (!preludeWritten) throw error
+    try {
+      await restoreConfigSnapshot(snapshot)
+    } catch (rollbackError) {
+      throw new AggregateError(
+        [error, rollbackError],
+        `${snapshot.file} apply failed and the original snapshot could not be restored`,
+      )
+    }
+    throw error
+  }
 }
 
 export function planGlobalHotApply(changes: readonly AgentChange[]): GlobalHotApplyPlan {

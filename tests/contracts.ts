@@ -89,6 +89,22 @@ async function shouldResolveConfiguredProfilesDirectoryRelativeToActiveProject()
   pass("shouldResolveConfiguredProfilesDirectoryRelativeToActiveProject")
 }
 
+async function shouldResolveSlashAndBackslashTildeProfilesDirectoriesFromHome(): Promise<void> {
+  // Given
+  const project = path.join(tmpdir(), "model-configurator-project")
+  const expected = path.join(homedir(), "profiles", "team")
+
+  // When
+  const actual = {
+    slash: await resolveProfilesRoot(import.meta.url, "~/profiles/team", project),
+    backslash: await resolveProfilesRoot(import.meta.url, "~\\profiles\\team", project),
+  }
+
+  // Then
+  assert.deepEqual(actual, { slash: expected, backslash: expected })
+  pass("shouldResolveSlashAndBackslashTildeProfilesDirectoriesFromHome")
+}
+
 async function shouldDeclareEveryExampleRootKeyWhenProfileSchemaIsStrict(): Promise<void> {
   // Given
   const profileExample = JSON.parse(await readFile(PROFILE_EXAMPLE_FILE, "utf8")) as Record<string, unknown>
@@ -607,6 +623,71 @@ async function shouldLeaveConfigUntouchedWhenFinalReviewIsCancelled(): Promise<v
     assert.equal(await readFile(configFile, "utf8"), original)
     assert.deepEqual((await readdir(path.dirname(configFile))).sort(), ["opencode.jsonc"])
     pass("shouldLeaveConfigUntouchedWhenFinalReviewIsCancelled")
+  } finally {
+    await rm(scratch.root, { recursive: true, force: true })
+  }
+}
+
+async function shouldReloadAndRejectStaleSelectionAfterFinalApplyInteraction(): Promise<void> {
+  const scratch = await createWizardFixture()
+  try {
+    // Given
+    const configFile = path.join(scratch.project, ".opencode", "opencode.jsonc")
+    const original = await readFile(configFile, "utf8")
+    const toasts: TuiToast[] = []
+    let hubVisits = 0
+    let groupVisits = 0
+    let modelAvailable = true
+    const api = createFakeApi(scratch, toasts, {
+      select(title, options) {
+        if (title === "Configuration scope") return option(options, "project")
+        if (title === "Agents") {
+          hubVisits += 1
+          return option(options, hubVisits === 1 ? "__group__:alpha" : "__review_changes__")
+        }
+        if (title === "alpha") {
+          groupVisits += 1
+          return option(options, groupVisits === 1 ? "alpha" : "__done__")
+        }
+        if (title === "Configure: alpha") return option(options, "openai/new")
+        if (title === "Variant for openai/new") return option(options, "high")
+        if (title.startsWith("Apply ")) {
+          modelAvailable = false
+          return option(options, "__apply__")
+        }
+        throw new Error(`unexpected select dialog: ${title}`)
+      },
+      confirm() {
+        return true
+      },
+    })
+    const provider = api.client.provider as unknown as { list: () => Promise<unknown> }
+    const listAvailableModels = provider.list.bind(provider)
+    provider.list = async () =>
+      modelAvailable
+        ? listAvailableModels()
+        : {
+            data: {
+              connected: ["anthropic"],
+              all: [{ id: "anthropic", models: { old: { variants: {} } } }],
+            },
+          }
+
+    // When
+    await runModelConfigurator(api, scratch.profiles)
+
+    // Then
+    assert.deepEqual(
+      {
+        content: await readFile(configFile, "utf8"),
+        warning: toasts.find((toast) => toast.variant === "warning")?.message,
+      },
+      {
+        content: original,
+        warning: "Selections changed in the live catalog: openai/new. Reopen and select again.",
+      },
+    )
+    pass("shouldReloadAndRejectStaleSelectionAfterFinalApplyInteraction")
   } finally {
     await rm(scratch.root, { recursive: true, force: true })
   }
@@ -2641,6 +2722,52 @@ async function shouldFallBackToLocalWriteWhenGlobalPatchFails(): Promise<void> {
   }
 }
 
+async function shouldRestoreOriginalSnapshotWhenGlobalPatchAndFallbackFail(): Promise<void> {
+  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-hot-apply."))
+  try {
+    // Given
+    const file = path.join(scratch, "opencode.jsonc")
+    const original = '{\n  "agent": {\n    "alpha": {"model": "openai/old"},\n    "beta": {"model": "anthropic/old"}\n  }\n}\n'
+    await writeFile(file, original)
+    const snapshot = await readConfigSnapshot(file)
+    const client = {
+      global: {
+        config: {
+          update: async () => ({ error: { name: "BadRequest" }, response: { status: 400 } }),
+        },
+      },
+    }
+    const runtime = { config: scratch, worktree: "/work/project", directory: "/work/project" }
+    const changes: AgentChange[] = [
+      { agent: "alpha", before: { model: "openai/old" }, after: { model: "openai/new" }, action: "set" },
+      { agent: "beta", before: { model: "anthropic/old" }, after: {}, action: "inherit" },
+    ]
+    let preludeOpened = false
+
+    // When
+    await assert.rejects(
+      () =>
+        applyConfigChanges(client, "global", runtime, snapshot, changes, {
+          before(step) {
+            if (step !== "temporary-open") return
+            if (preludeOpened) throw new Error("injected fallback failure")
+            preludeOpened = true
+          },
+        }),
+      /injected fallback failure/,
+    )
+
+    // Then
+    assert.deepEqual(
+      { content: await readFile(file, "utf8"), entries: await readdir(scratch) },
+      { content: original, entries: ["opencode.jsonc"] },
+    )
+    pass("shouldRestoreOriginalSnapshotWhenGlobalPatchAndFallbackFail")
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+}
+
 async function shouldReportRestartFallbackWhenClientLacksHotApplyRoutes(): Promise<void> {
   const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-hot-apply."))
   try {
@@ -2947,6 +3074,7 @@ function pass(name: string): void {
 
 await shouldNormalizeProfilesDirectoryWhenPluginOptionsAreProvided()
 await shouldResolveConfiguredProfilesDirectoryRelativeToActiveProject()
+await shouldResolveSlashAndBackslashTildeProfilesDirectoriesFromHome()
 await shouldDeclareEveryExampleRootKeyWhenProfileSchemaIsStrict()
 await shouldValidateProfileAsWholeContractWhenProfileIsComplete()
 await shouldRejectDuplicateAndMalformedAgentsWhenProfileIsInvalid()
@@ -2963,6 +3091,7 @@ await shouldKeepCoreConfigurationUsableWhenPresetStorageIsUnavailable()
 await shouldKeepCoreConfigurationUsableWhenPresetStorageIsUnreadable()
 await shouldRestorePresetStorageWhenWizardReopensAfterRepair()
 await shouldLeaveConfigUntouchedWhenFinalReviewIsCancelled()
+await shouldReloadAndRejectStaleSelectionAfterFinalApplyInteraction()
 await shouldReshowPreviousDialogWhenEscapingBack()
 await shouldExitWithoutWritingWhenScopeIsEscaped()
 await shouldSavePresetWhenApplyingAndSaving()
@@ -3007,6 +3136,7 @@ await shouldPlanWriteOnlyWhenGlobalChangesAreRemovalOnly()
 await shouldHotApplyProjectScopeByDisposingTheProjectInstance()
 await shouldHotApplyGlobalScopeViaConfigPatchAfterLocalDeletions()
 await shouldFallBackToLocalWriteWhenGlobalPatchFails()
+await shouldRestoreOriginalSnapshotWhenGlobalPatchAndFallbackFail()
 await shouldReportRestartFallbackWhenClientLacksHotApplyRoutes()
 await shouldToastLiveApplyWhenProjectInstanceDisposalSucceeds()
 await shouldShortenConfigFilePathsForDisplay()
