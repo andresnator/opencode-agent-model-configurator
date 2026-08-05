@@ -48,6 +48,9 @@ import type {
 
 const ROOT = path.resolve(import.meta.dirname, "..")
 const FIXTURES = path.join(ROOT, "tests", "fixtures")
+const PROFILE_EXAMPLE_FILE = path.join(ROOT, "examples", "profiles", "team.example.json")
+const PROFILE_SCHEMA_FILE = path.join(ROOT, "schemas", "profile.schema.json")
+const PROFILE_SCHEMA_REFERENCE_KEY = "$schema"
 const EXPECTED_FAILURE_STEPS: PersistenceStep[] = [
   "temporary-open",
   "temporary-write",
@@ -84,6 +87,33 @@ async function shouldResolveConfiguredProfilesDirectoryRelativeToActiveProject()
   // Then
   assert.equal(actual, path.join(project, ".opencode", "model-profiles"))
   pass("shouldResolveConfiguredProfilesDirectoryRelativeToActiveProject")
+}
+
+async function shouldDeclareEveryExampleRootKeyWhenProfileSchemaIsStrict(): Promise<void> {
+  // Given
+  const profileExample = JSON.parse(await readFile(PROFILE_EXAMPLE_FILE, "utf8")) as Record<string, unknown>
+  const profileSchema = JSON.parse(await readFile(PROFILE_SCHEMA_FILE, "utf8")) as {
+    properties: Record<string, unknown>
+    additionalProperties: unknown
+  }
+
+  // When
+  const undeclaredRootKeys = Object.keys(profileExample)
+    .filter((rootKey) => !Object.hasOwn(profileSchema.properties, rootKey))
+    .sort()
+  const actual = {
+    undeclaredRootKeys,
+    schemaDeclaration: profileSchema.properties[PROFILE_SCHEMA_REFERENCE_KEY],
+    additionalProperties: profileSchema.additionalProperties,
+  }
+
+  // Then
+  assert.deepEqual(actual, {
+    undeclaredRootKeys: [],
+    schemaDeclaration: { type: "string" },
+    additionalProperties: false,
+  })
+  pass("shouldDeclareEveryExampleRootKeyWhenProfileSchemaIsStrict")
 }
 
 async function shouldValidateProfileAsWholeContractWhenProfileIsComplete(): Promise<void> {
@@ -2908,6 +2938,7 @@ function pass(name: string): void {
 
 await shouldNormalizeProfilesDirectoryWhenPluginOptionsAreProvided()
 await shouldResolveConfiguredProfilesDirectoryRelativeToActiveProject()
+await shouldDeclareEveryExampleRootKeyWhenProfileSchemaIsStrict()
 await shouldValidateProfileAsWholeContractWhenProfileIsComplete()
 await shouldRejectDuplicateAndMalformedAgentsWhenProfileIsInvalid()
 await shouldKeepKnownAgentsAndWarnWhenTierReferencesAgentsMissingOnThisServer()
