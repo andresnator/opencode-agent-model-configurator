@@ -1,6 +1,7 @@
 import type { AgentChange } from "./domain"
 import {
   readConfigSnapshot,
+  renderConfigChanges,
   restoreConfigSnapshot,
   writeConfigChanges,
   type ConfigScope,
@@ -74,10 +75,11 @@ export async function applyConfigChanges(
     return { file: result.file, hotApplied: false, detail: plan.reason }
   }
 
+  const preludeContent = renderConfigChanges(snapshot, plan.preludeChanges)
   let preludeWritten = false
   try {
     await writeConfigChanges(snapshot, plan.preludeChanges, hooks)
-    preludeWritten = true
+    preludeWritten = preludeContent !== snapshot.content
     const hot = await patchGlobalConfig(client, plan.patch)
     if (hot.applied) return { file: snapshot.file, hotApplied: true }
 
@@ -87,7 +89,7 @@ export async function applyConfigChanges(
   } catch (error) {
     if (!preludeWritten) throw error
     try {
-      await restoreConfigSnapshot(snapshot)
+      await restoreConfigSnapshot(snapshot, preludeContent)
     } catch (rollbackError) {
       throw new AggregateError(
         [error, rollbackError],

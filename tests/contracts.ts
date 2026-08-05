@@ -2768,6 +2768,74 @@ async function shouldRestoreOriginalSnapshotWhenGlobalPatchAndFallbackFail(): Pr
   }
 }
 
+async function shouldPreserveConcurrentEditWhenGlobalRollbackConflicts(): Promise<void> {
+  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-hot-apply."))
+  try {
+    // Given
+    const file = path.join(scratch, "opencode.jsonc")
+    const original = '{\n  "agent": {\n    "alpha": {"model": "openai/old"},\n    "beta": {"model": "anthropic/old"}\n  }\n}\n'
+    const external = '{\n  "external": true,\n  "agent": {\n    "alpha": {"model": "openai/external"}\n  }\n}\n'
+    await writeFile(file, original)
+    const snapshot = await readConfigSnapshot(file)
+    const client = {
+      global: {
+        config: {
+          update: async () => {
+            await writeFile(file, external)
+            return { error: { name: "BadRequest" }, response: { status: 400 } }
+          },
+        },
+      },
+    }
+    const runtime = { config: scratch, worktree: "/work/project", directory: "/work/project" }
+    const changes: AgentChange[] = [
+      { agent: "alpha", before: { model: "openai/old" }, after: { model: "openai/new" }, action: "set" },
+      { agent: "beta", before: { model: "anthropic/old" }, after: {}, action: "inherit" },
+    ]
+    let preludeOpened = false
+    let failure: unknown
+
+    // When
+    try {
+      await applyConfigChanges(client, "global", runtime, snapshot, changes, {
+        before(step) {
+          if (step !== "temporary-open") return
+          if (preludeOpened) throw new Error("injected fallback failure")
+          preludeOpened = true
+        },
+      })
+    } catch (error) {
+      failure = error
+    }
+
+    // Then
+    assert.deepEqual(
+      {
+        aggregate: failure instanceof AggregateError,
+        message: failure instanceof Error ? failure.message : undefined,
+        causes: failure instanceof AggregateError
+          ? failure.errors.map((error) => (error instanceof Error ? error.message : String(error)))
+          : [],
+        content: await readFile(file, "utf8"),
+        entries: await readdir(scratch),
+      },
+      {
+        aggregate: true,
+        message: `${file} apply failed and the original snapshot could not be restored`,
+        causes: [
+          "injected fallback failure",
+          `${file} rollback conflict: configuration changed after the plugin write; preserving newer content`,
+        ],
+        content: external,
+        entries: ["opencode.jsonc"],
+      },
+    )
+    pass("shouldPreserveConcurrentEditWhenGlobalRollbackConflicts")
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+}
+
 async function shouldReportRestartFallbackWhenClientLacksHotApplyRoutes(): Promise<void> {
   const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-hot-apply."))
   try {
@@ -3137,6 +3205,7 @@ await shouldHotApplyProjectScopeByDisposingTheProjectInstance()
 await shouldHotApplyGlobalScopeViaConfigPatchAfterLocalDeletions()
 await shouldFallBackToLocalWriteWhenGlobalPatchFails()
 await shouldRestoreOriginalSnapshotWhenGlobalPatchAndFallbackFail()
+await shouldPreserveConcurrentEditWhenGlobalRollbackConflicts()
 await shouldReportRestartFallbackWhenClientLacksHotApplyRoutes()
 await shouldToastLiveApplyWhenProjectInstanceDisposalSucceeds()
 await shouldShortenConfigFilePathsForDisplay()

@@ -23,6 +23,7 @@ export declare function resolveConfigFile(scope: ConfigScope, runtime: RuntimePa
 export declare function readConfigSnapshot(file: string): Promise<ConfigSnapshot>;
 export declare function renderConfigChanges(snapshot: ConfigSnapshot, changes: readonly AgentChange[]): string;
 export declare function writeConfigChanges(snapshot: ConfigSnapshot, changes: readonly AgentChange[], hooks?: PersistenceHooks): Promise<WriteResult>;
+export declare function restoreConfigSnapshot(snapshot: ConfigSnapshot, expectedContent: string): Promise<void>;
 export declare function higherPrecedenceWarning(): string | undefined;
 export declare function globalConfigRoot(runtime: RuntimePaths): string;
 export declare function displayConfigFile(scope: ConfigScope, file: string, runtime: RuntimePaths): string;

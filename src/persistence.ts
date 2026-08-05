@@ -95,27 +95,43 @@ export async function writeConfigChanges(
   return writeConfigContent(snapshot, rendered, hooks)
 }
 
-export async function restoreConfigSnapshot(snapshot: ConfigSnapshot): Promise<void> {
-  const current = await readConfigSnapshot(snapshot.file)
+export async function restoreConfigSnapshot(snapshot: ConfigSnapshot, expectedContent: string): Promise<void> {
+  const conflictMessage = `${snapshot.file} rollback conflict: configuration changed after the plugin write; preserving newer content`
   if (!snapshot.exists) {
-    if (!current.exists) return
+    let current: string
+    try {
+      current = await readFile(snapshot.file, "utf8")
+    } catch (error) {
+      if (isMissing(error)) throw new Error(conflictMessage)
+      throw error
+    }
+    if (current !== expectedContent) throw new Error(conflictMessage)
     await rm(snapshot.file)
     await syncDirectory(path.dirname(snapshot.file))
     return
   }
 
-  await writeConfigContent({ ...current, mode: snapshot.mode }, snapshot.content)
+  await writeConfigContent({ ...snapshot, exists: true, content: expectedContent }, snapshot.content, {}, conflictMessage)
 }
 
 async function writeConfigContent(
   snapshot: ConfigSnapshot,
   rendered: string,
   hooks: PersistenceHooks = {},
+  conflictMessage?: string,
 ): Promise<WriteResult> {
   await mkdir(path.dirname(snapshot.file), { recursive: true, mode: 0o700 })
   if (snapshot.exists) {
-    const current = await readFile(snapshot.file, "utf8")
-    if (current !== snapshot.content) throw new Error(`${snapshot.file} changed while the configurator was open; reload and retry`)
+    let current: string
+    try {
+      current = await readFile(snapshot.file, "utf8")
+    } catch (error) {
+      if (conflictMessage && isMissing(error)) throw new Error(conflictMessage)
+      throw error
+    }
+    if (current !== snapshot.content) {
+      throw new Error(conflictMessage ?? `${snapshot.file} changed while the configurator was open; reload and retry`)
+    }
   } else if (await exists(snapshot.file)) {
     throw new Error(`${snapshot.file} was created while the configurator was open; reload and retry`)
   }

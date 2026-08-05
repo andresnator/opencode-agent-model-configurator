@@ -8,8 +8,9 @@ async function resolveProfilesRoot(moduleUrl, configuredProfilesDir, baseDirecto
   if (configuredProfilesDir) {
     if (configuredProfilesDir.startsWith("file://")) return fileURLToPath(configuredProfilesDir);
     if (configuredProfilesDir === "~") return homedir();
-    if (configuredProfilesDir.startsWith(`~${path.sep}`)) {
-      return path.join(homedir(), configuredProfilesDir.slice(2));
+    const tildePath = configuredProfilesDir.match(/^~[\\/](.*)$/);
+    if (tildePath) {
+      return path.join(homedir(), ...tildePath[1].split(/[\\/]/));
     }
     return path.resolve(baseDirectory, configuredProfilesDir);
   }
@@ -1689,10 +1690,38 @@ async function writeConfigChanges(snapshot, changes, hooks = {}) {
   if (changes.length === 0) return { file: snapshot.file };
   const rendered = renderConfigChanges(snapshot, changes);
   if (rendered === snapshot.content) return { file: snapshot.file };
+  return writeConfigContent(snapshot, rendered, hooks);
+}
+async function restoreConfigSnapshot(snapshot, expectedContent) {
+  const conflictMessage = `${snapshot.file} rollback conflict: configuration changed after the plugin write; preserving newer content`;
+  if (!snapshot.exists) {
+    let current;
+    try {
+      current = await readFile2(snapshot.file, "utf8");
+    } catch (error) {
+      if (isMissing(error)) throw new Error(conflictMessage);
+      throw error;
+    }
+    if (current !== expectedContent) throw new Error(conflictMessage);
+    await rm(snapshot.file);
+    await syncDirectory(path2.dirname(snapshot.file));
+    return;
+  }
+  await writeConfigContent({ ...snapshot, exists: true, content: expectedContent }, snapshot.content, {}, conflictMessage);
+}
+async function writeConfigContent(snapshot, rendered, hooks = {}, conflictMessage) {
   await mkdir(path2.dirname(snapshot.file), { recursive: true, mode: 448 });
   if (snapshot.exists) {
-    const current = await readFile2(snapshot.file, "utf8");
-    if (current !== snapshot.content) throw new Error(`${snapshot.file} changed while the configurator was open; reload and retry`);
+    let current;
+    try {
+      current = await readFile2(snapshot.file, "utf8");
+    } catch (error) {
+      if (conflictMessage && isMissing(error)) throw new Error(conflictMessage);
+      throw error;
+    }
+    if (current !== snapshot.content) {
+      throw new Error(conflictMessage ?? `${snapshot.file} changed while the configurator was open; reload and retry`);
+    }
   } else if (await exists(snapshot.file)) {
     throw new Error(`${snapshot.file} was created while the configurator was open; reload and retry`);
   }
@@ -1820,23 +1849,39 @@ function isMissing(error) {
 }
 
 // src/hot-apply.ts
-async function applyConfigChanges(client, scope, runtime, snapshot, changes) {
+async function applyConfigChanges(client, scope, runtime, snapshot, changes, hooks = {}) {
   if (scope === "project") {
-    const result2 = await writeConfigChanges(snapshot, changes);
-    const hot2 = await disposeProjectInstance(client, runtime);
-    return outcome(result2.file, hot2);
+    const result = await writeConfigChanges(snapshot, changes, hooks);
+    const hot = await disposeProjectInstance(client, runtime);
+    return outcome(result.file, hot);
   }
   const plan = planGlobalHotApply(changes);
   if (plan.strategy === "write-only") {
-    const result2 = await writeConfigChanges(snapshot, changes);
-    return { file: result2.file, hotApplied: false, detail: plan.reason };
+    const result = await writeConfigChanges(snapshot, changes, hooks);
+    return { file: result.file, hotApplied: false, detail: plan.reason };
   }
-  await writeConfigChanges(snapshot, plan.preludeChanges);
-  const hot = await patchGlobalConfig(client, plan.patch);
-  if (hot.applied) return { file: snapshot.file, hotApplied: true };
-  const fresh = await readConfigSnapshot(snapshot.file);
-  const result = await writeConfigChanges(fresh, plan.fallbackChanges);
-  return outcome(result.file, hot);
+  const preludeContent = renderConfigChanges(snapshot, plan.preludeChanges);
+  let preludeWritten = false;
+  try {
+    await writeConfigChanges(snapshot, plan.preludeChanges, hooks);
+    preludeWritten = preludeContent !== snapshot.content;
+    const hot = await patchGlobalConfig(client, plan.patch);
+    if (hot.applied) return { file: snapshot.file, hotApplied: true };
+    const fresh = await readConfigSnapshot(snapshot.file);
+    const result = await writeConfigChanges(fresh, plan.fallbackChanges, hooks);
+    return outcome(result.file, hot);
+  } catch (error) {
+    if (!preludeWritten) throw error;
+    try {
+      await restoreConfigSnapshot(snapshot, preludeContent);
+    } catch (rollbackError) {
+      throw new AggregateError(
+        [error, rollbackError],
+        `${snapshot.file} apply failed and the original snapshot could not be restored`
+      );
+    }
+    throw error;
+  }
 }
 function planGlobalHotApply(changes) {
   const sets = changes.filter((change) => change.action === "set" && change.after.model !== void 0);
@@ -2523,12 +2568,6 @@ async function runReviewStep(api, state) {
     api.ui.toast({ variant: "info", message: "No model assignment changes selected." });
     return "back";
   }
-  const refreshedModels = flattenModels(await loadCatalog(api));
-  const stale = findStaleSelections(decisions, refreshedModels);
-  if (stale.length > 0) {
-    api.ui.toast({ variant: "warning", message: `Selections changed in the live catalog: ${stale.join(", ")}. Reopen and select again.` });
-    return "exit";
-  }
   const warning = higherPrecedenceWarning();
   const categoryOf = reviewCategories(state.agents);
   const rows = [...changes].sort(
@@ -2565,6 +2604,12 @@ async function runReviewStep(api, state) {
   if (choice === APPLY_SAVE) {
     presetName = await promptPresetName(api, state);
     if (presetName === void 0) return "back";
+  }
+  const refreshedModels = flattenModels(await loadCatalog(api));
+  const stale = findStaleSelections(decisions, refreshedModels);
+  if (stale.length > 0) {
+    api.ui.toast({ variant: "warning", message: `Selections changed in the live catalog: ${stale.join(", ")}. Reopen and select again.` });
+    return "exit";
   }
   const result = await applyConfigChanges(api.client, state.scope, api.state.path, snapshot, changes);
   api.ui.toast({
