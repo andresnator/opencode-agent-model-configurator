@@ -1,0 +1,73 @@
+name: Bug report
+description: Report a reproducible, non-security plugin problem
+title: "[Bug]: "
+labels: []
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form only for public, non-security bugs.
+        **Do not post secrets or suspected vulnerability details.** Report vulnerabilities only through [GitHub Private Vulnerability Reporting](https://github.com/andresnator/opencode-agent-model-configurator/security/advisories/new).
+
+  - type: input
+    id: plugin-version
+    attributes:
+      label: Plugin version or revision
+      description: Provide the source tag or commit SHA loaded by OpenCode.
+      placeholder: v0.1.0 or a full commit SHA
+    validations:
+      required: true
+
+  - type: input
+    id: opencode-version
+    attributes:
+      label: OpenCode version
+      description: Provide the exact OpenCode version.
+      placeholder: 1.18.10
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include the operating system and version, CPU architecture, shell, Node.js version, and project or global scope.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest sequence that consistently shows the problem.
+      placeholder: |
+        1. Start with ...
+        2. Open ...
+        3. Select ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-result
+    attributes:
+      label: Expected result
+      description: Describe what you expected to observe.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual-result
+    attributes:
+      label: Actual result
+      description: Describe what happened instead, including the exact visible error when relevant.
+    validations:
+      required: true
+
+  - type: textarea
+    id: sanitized-logs
+    attributes:
+      label: Sanitized logs or output
+      description: Paste only the smallest relevant excerpt after removing tokens, API keys, credentials, user names, private paths, and private repository data. Write `None` when no logs are available.
+    validations:
+      required: true
