@@ -98,10 +98,15 @@ async function shouldDeclareEveryExampleRootKeyWhenProfileSchemaIsStrict(): Prom
   }
 
   // When
+  const profileValidation = validateProfile(profileExample, [])
   const undeclaredRootKeys = Object.keys(profileExample)
     .filter((rootKey) => !Object.hasOwn(profileSchema.properties, rootKey))
     .sort()
   const actual = {
+    profileValidation: {
+      accepted: profileValidation.profile !== undefined,
+      errors: profileValidation.errors,
+    },
     undeclaredRootKeys,
     schemaDeclaration: profileSchema.properties[PROFILE_SCHEMA_REFERENCE_KEY],
     additionalProperties: profileSchema.additionalProperties,
@@ -109,6 +114,10 @@ async function shouldDeclareEveryExampleRootKeyWhenProfileSchemaIsStrict(): Prom
 
   // Then
   assert.deepEqual(actual, {
+    profileValidation: {
+      accepted: true,
+      errors: [],
+    },
     undeclaredRootKeys: [],
     schemaDeclaration: { type: "string" },
     additionalProperties: false,
