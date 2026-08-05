@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import crypto from "node:crypto"
 import { writeFileSync } from "node:fs"
-import { mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, open, readFile, readdir, rm, stat, writeFile, type FileHandle } from "node:fs/promises"
 import { syncBuiltinESMExports } from "node:module"
 import { homedir, tmpdir } from "node:os"
 import path from "node:path"
@@ -60,6 +60,8 @@ const GLOBAL_EXTERNAL_EDIT_BYTES = Buffer.from(
   '{\n  "external": true,\n  "agent": {\n    "alpha": {"model": "openai/external"}\n  }\n}\n',
 )
 const INJECTED_FALLBACK_FAILURE = "injected fallback failure"
+const CONFIG_WRITE_DIRECTORY_SUFFIX = ".write"
+const CONFIG_WRITE_CLAIM_NAME = "claim"
 const FIRST_CONFIG_CHANGES: readonly AgentChange[] = [
   { agent: "alpha", before: {}, after: { model: "openai/new" }, action: "set" },
 ]
@@ -2900,6 +2902,106 @@ async function shouldRejectWithoutClobberWhenConcurrentEditPrecedesGlobalFallbac
   }
 }
 
+async function shouldRestoreHeldDescriptorEditWhenConcurrentEditPrecedesGlobalFallback(): Promise<void> {
+  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-hot-apply."))
+  try {
+    // Given
+    const file = path.join(scratch, CONFIG_FILE_NAME)
+    await writeFile(file, GLOBAL_CONFIG_BYTES, { mode: CONFIG_FILE_MODE })
+    const snapshot = await readConfigSnapshot(file)
+    const heldFile = await open(file, "r+")
+    try {
+      const originalMetadata = await heldFile.stat()
+      let patchCalls = 0
+      let heldMutation = emptyHeldClaimMutationEvidence()
+      const client = {
+        global: {
+          config: {
+            update: async () => {
+              patchCalls += 1
+              heldMutation = await overwriteRetainedClaimThroughHandle(
+                scratch,
+                file,
+                heldFile,
+                originalMetadata,
+                GLOBAL_EXTERNAL_EDIT_BYTES,
+              )
+              return { error: { name: "BadRequest" }, response: { status: 400 } }
+            },
+          },
+        },
+      }
+      const runtime = { config: scratch, worktree: "/work/project", directory: "/work/project" }
+      const changes: AgentChange[] = [
+        { agent: "alpha", before: { model: "openai/old" }, after: { model: "openai/new" }, action: "set" },
+        { agent: "beta", before: { model: "anthropic/old" }, after: {}, action: "inherit" },
+      ]
+      const hookOccurrences = persistenceHookCounts()
+      let failure: unknown
+
+      // When
+      try {
+        await applyConfigChanges(client, "global", runtime, snapshot, changes, {
+          before(step) {
+            hookOccurrences[step] += 1
+          },
+        })
+      } catch (error) {
+        failure = error
+      }
+
+      // Then
+      assert.deepEqual(
+        {
+          rejection: {
+            aggregate: failure instanceof AggregateError,
+            message: failure instanceof Error ? failure.message : failure,
+            causes: failure instanceof AggregateError
+              ? failure.errors.map((error) => (error instanceof Error ? error.message : String(error)))
+              : [],
+          },
+          heldMutation,
+          patchCalls,
+          hookOccurrences,
+          bytes: await readFile(file),
+          mode: (await stat(file)).mode & 0o777,
+          entries: (await readdir(scratch)).sort(),
+        },
+        {
+          rejection: {
+            aggregate: false,
+            message: `${file} changed while the configurator was open; reload and retry`,
+            causes: [],
+          },
+          heldMutation: {
+            descriptorKeptOriginalInode: true,
+            descriptorBecameRetainedClaim: true,
+            descriptorDetachedFromDestination: true,
+            destinationWasNotReplaced: true,
+          },
+          patchCalls: 1,
+          hookOccurrences: {
+            "temporary-open": 1,
+            "temporary-write": 1,
+            "temporary-flush": 1,
+            rename: 1,
+            "destination-flush": 1,
+            "post-validate": 1,
+          },
+          bytes: GLOBAL_EXTERNAL_EDIT_BYTES,
+          mode: CONFIG_FILE_MODE,
+          entries: [CONFIG_FILE_NAME],
+        },
+      )
+      pass("shouldRestoreHeldDescriptorEditWhenConcurrentEditPrecedesGlobalFallback")
+    } finally {
+      await heldFile.close()
+    }
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+}
+
 async function shouldRestoreOriginalSnapshotWhenGlobalPatchAndFallbackFail(): Promise<void> {
   const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-hot-apply."))
   try {
@@ -3026,6 +3128,111 @@ async function shouldPreserveConcurrentEditWhenGlobalRollbackConflicts(): Promis
       },
     )
     pass("shouldPreserveConcurrentEditWhenGlobalRollbackConflicts")
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+}
+
+async function shouldRestoreHeldDescriptorEditWhenGlobalRollbackFindsMutatedClaim(): Promise<void> {
+  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-hot-apply."))
+  try {
+    // Given
+    const file = path.join(scratch, CONFIG_FILE_NAME)
+    await writeFile(file, GLOBAL_CONFIG_BYTES, { mode: CONFIG_FILE_MODE })
+    const snapshot = await readConfigSnapshot(file)
+    const heldFile = await open(file, "r+")
+    try {
+      const originalMetadata = await heldFile.stat()
+      let patchCalls = 0
+      const client = {
+        global: {
+          config: {
+            update: async () => {
+              patchCalls += 1
+              return { error: { name: "BadRequest" }, response: { status: 400 } }
+            },
+          },
+        },
+      }
+      const runtime = { config: scratch, worktree: "/work/project", directory: "/work/project" }
+      const changes: AgentChange[] = [
+        { agent: "alpha", before: { model: "openai/old" }, after: { model: "openai/new" }, action: "set" },
+        { agent: "beta", before: { model: "anthropic/old" }, after: {}, action: "inherit" },
+      ]
+      const hookOccurrences = persistenceHookCounts()
+      let heldMutation = emptyHeldClaimMutationEvidence()
+      let failure: unknown
+
+      // When
+      try {
+        await applyConfigChanges(client, "global", runtime, snapshot, changes, {
+          async before(step) {
+            hookOccurrences[step] += 1
+            if (step !== "temporary-open" || hookOccurrences[step] !== 2) return
+            heldMutation = await overwriteRetainedClaimThroughHandle(
+              scratch,
+              file,
+              heldFile,
+              originalMetadata,
+              GLOBAL_EXTERNAL_EDIT_BYTES,
+            )
+            throw new Error(INJECTED_FALLBACK_FAILURE)
+          },
+        })
+      } catch (error) {
+        failure = error
+      }
+
+      // Then
+      assert.deepEqual(
+        {
+          rejection: {
+            aggregate: failure instanceof AggregateError,
+            message: failure instanceof Error ? failure.message : failure,
+            causes: failure instanceof AggregateError
+              ? failure.errors.map((error) => (error instanceof Error ? error.message : String(error)))
+              : [],
+          },
+          heldMutation,
+          patchCalls,
+          hookOccurrences,
+          bytes: await readFile(file),
+          mode: (await stat(file)).mode & 0o777,
+          entries: (await readdir(scratch)).sort(),
+        },
+        {
+          rejection: {
+            aggregate: true,
+            message: `${file} apply failed and the original snapshot could not be restored`,
+            causes: [
+              INJECTED_FALLBACK_FAILURE,
+              `${file} rollback conflict: configuration changed after the plugin write; preserving newer content`,
+            ],
+          },
+          heldMutation: {
+            descriptorKeptOriginalInode: true,
+            descriptorBecameRetainedClaim: true,
+            descriptorDetachedFromDestination: true,
+            destinationWasNotReplaced: true,
+          },
+          patchCalls: 1,
+          hookOccurrences: {
+            "temporary-open": 2,
+            "temporary-write": 1,
+            "temporary-flush": 1,
+            rename: 1,
+            "destination-flush": 1,
+            "post-validate": 1,
+          },
+          bytes: GLOBAL_EXTERNAL_EDIT_BYTES,
+          mode: CONFIG_FILE_MODE,
+          entries: [CONFIG_FILE_NAME],
+        },
+      )
+      pass("shouldRestoreHeldDescriptorEditWhenGlobalRollbackFindsMutatedClaim")
+    } finally {
+      await heldFile.close()
+    }
   } finally {
     await rm(scratch, { recursive: true, force: true })
   }
@@ -3341,6 +3548,63 @@ function persistenceHookCounts(): Record<PersistenceStep, number> {
   }
 }
 
+function emptyHeldClaimMutationEvidence(): Record<
+  | "descriptorKeptOriginalInode"
+  | "descriptorBecameRetainedClaim"
+  | "descriptorDetachedFromDestination"
+  | "destinationWasNotReplaced",
+  boolean
+> {
+  return {
+    descriptorKeptOriginalInode: false,
+    descriptorBecameRetainedClaim: false,
+    descriptorDetachedFromDestination: false,
+    destinationWasNotReplaced: false,
+  }
+}
+
+async function overwriteRetainedClaimThroughHandle(
+  directory: string,
+  destination: string,
+  heldFile: FileHandle,
+  originalMetadata: { dev: number | bigint; ino: number | bigint },
+  bytes: Buffer,
+): Promise<ReturnType<typeof emptyHeldClaimMutationEvidence>> {
+  const operationDirectory = (await readdir(directory)).find((entry) => entry.endsWith(CONFIG_WRITE_DIRECTORY_SUFFIX))
+  if (!operationDirectory) throw new Error(`Expected retained write ownership for ${destination}`)
+  const claim = path.join(directory, operationDirectory, CONFIG_WRITE_CLAIM_NAME)
+  const [heldBefore, claimBefore, destinationBefore] = await Promise.all([
+    heldFile.stat(),
+    stat(claim),
+    stat(destination),
+  ])
+
+  await heldFile.truncate(0)
+  await heldFile.write(bytes, 0, bytes.length, 0)
+  await heldFile.sync()
+
+  const [heldAfter, claimAfter, destinationAfter] = await Promise.all([
+    heldFile.stat(),
+    stat(claim),
+    stat(destination),
+  ])
+  return {
+    descriptorKeptOriginalInode:
+      sameFileIdentity(originalMetadata, heldBefore) && sameFileIdentity(heldBefore, heldAfter),
+    descriptorBecameRetainedClaim:
+      sameFileIdentity(heldBefore, claimBefore) && sameFileIdentity(heldAfter, claimAfter),
+    descriptorDetachedFromDestination: !sameFileIdentity(heldBefore, destinationBefore),
+    destinationWasNotReplaced: sameFileIdentity(destinationBefore, destinationAfter),
+  }
+}
+
+function sameFileIdentity(
+  left: { dev: number | bigint; ino: number | bigint },
+  right: { dev: number | bigint; ino: number | bigint },
+): boolean {
+  return left.dev === right.dev && left.ino === right.ino
+}
+
 function pass(name: string): void {
   passes += 1
   process.stdout.write(`PASS ${name}\n`)
@@ -3412,8 +3676,10 @@ await shouldHotApplyProjectScopeByDisposingTheProjectInstance()
 await shouldHotApplyGlobalScopeViaConfigPatchAfterLocalDeletions()
 await shouldFallBackToLocalWriteWhenGlobalPatchFails()
 await shouldRejectWithoutClobberWhenConcurrentEditPrecedesGlobalFallback()
+await shouldRestoreHeldDescriptorEditWhenConcurrentEditPrecedesGlobalFallback()
 await shouldRestoreOriginalSnapshotWhenGlobalPatchAndFallbackFail()
 await shouldPreserveConcurrentEditWhenGlobalRollbackConflicts()
+await shouldRestoreHeldDescriptorEditWhenGlobalRollbackFindsMutatedClaim()
 await shouldReportRestartFallbackWhenClientLacksHotApplyRoutes()
 await shouldToastLiveApplyWhenProjectInstanceDisposalSucceeds()
 await shouldShortenConfigFilePathsForDisplay()

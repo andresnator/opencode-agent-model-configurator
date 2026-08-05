@@ -99,6 +99,7 @@ export async function applyConfigChanges(
       try {
         await releaseConfigWriteOwnership(ownership)
       } catch (cleanupError) {
+        if (isConfigWriteConflictError(cleanupError)) throw error
         throw new AggregateError(
           [error, cleanupError],
           `${snapshot.file} apply failed and operation-owned artifacts could not be cleaned`,
