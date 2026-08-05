@@ -53,6 +53,13 @@ const CONFIG_FILE_MODE = 0o640
 const CONFIG_BEFORE_BYTES = await readFile(path.join(FIXTURES, "config-before.jsonc"))
 const CONFIG_AFTER_BYTES = await readFile(path.join(FIXTURES, "config-after.jsonc"))
 const LATE_EDIT_BYTES = Buffer.from('{\n  "external": true\n}\n')
+const GLOBAL_CONFIG_BYTES = Buffer.from(
+  '{\n  "agent": {\n    "alpha": {"model": "openai/old"},\n    "beta": {"model": "anthropic/old"}\n  }\n}\n',
+)
+const GLOBAL_EXTERNAL_EDIT_BYTES = Buffer.from(
+  '{\n  "external": true,\n  "agent": {\n    "alpha": {"model": "openai/external"}\n  }\n}\n',
+)
+const INJECTED_FALLBACK_FAILURE = "injected fallback failure"
 const FIRST_CONFIG_CHANGES: readonly AgentChange[] = [
   { agent: "alpha", before: {}, after: { model: "openai/new" }, action: "set" },
 ]
@@ -2813,6 +2820,86 @@ async function shouldFallBackToLocalWriteWhenGlobalPatchFails(): Promise<void> {
   }
 }
 
+async function shouldRejectWithoutClobberWhenConcurrentEditPrecedesGlobalFallback(): Promise<void> {
+  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-hot-apply."))
+  try {
+    // Given
+    const file = path.join(scratch, CONFIG_FILE_NAME)
+    await writeFile(file, GLOBAL_CONFIG_BYTES, { mode: CONFIG_FILE_MODE })
+    const snapshot = await readConfigSnapshot(file)
+    let patchCalls = 0
+    const client = {
+      global: {
+        config: {
+          update: async () => {
+            patchCalls += 1
+            await writeFile(file, GLOBAL_EXTERNAL_EDIT_BYTES)
+            return { error: { name: "BadRequest" }, response: { status: 400 } }
+          },
+        },
+      },
+    }
+    const runtime = { config: scratch, worktree: "/work/project", directory: "/work/project" }
+    const changes: AgentChange[] = [
+      { agent: "alpha", before: { model: "openai/old" }, after: { model: "openai/new" }, action: "set" },
+      { agent: "beta", before: { model: "anthropic/old" }, after: {}, action: "inherit" },
+    ]
+    const hookOccurrences = persistenceHookCounts()
+    let failure: unknown
+
+    // When
+    try {
+      await applyConfigChanges(client, "global", runtime, snapshot, changes, {
+        before(step) {
+          hookOccurrences[step] += 1
+        },
+      })
+    } catch (error) {
+      failure = error
+    }
+
+    // Then
+    assert.deepEqual(
+      {
+        rejection: {
+          aggregate: failure instanceof AggregateError,
+          message: failure instanceof Error ? failure.message : failure,
+          causes: failure instanceof AggregateError
+            ? failure.errors.map((error) => (error instanceof Error ? error.message : String(error)))
+            : [],
+        },
+        patchCalls,
+        hookOccurrences,
+        bytes: await readFile(file),
+        mode: (await stat(file)).mode & 0o777,
+        entries: (await readdir(scratch)).sort(),
+      },
+      {
+        rejection: {
+          aggregate: false,
+          message: `${file} changed while the configurator was open; reload and retry`,
+          causes: [],
+        },
+        patchCalls: 1,
+        hookOccurrences: {
+          "temporary-open": 1,
+          "temporary-write": 1,
+          "temporary-flush": 1,
+          rename: 1,
+          "destination-flush": 1,
+          "post-validate": 1,
+        },
+        bytes: GLOBAL_EXTERNAL_EDIT_BYTES,
+        mode: CONFIG_FILE_MODE,
+        entries: [CONFIG_FILE_NAME],
+      },
+    )
+    pass("shouldRejectWithoutClobberWhenConcurrentEditPrecedesGlobalFallback")
+  } finally {
+    await rm(scratch, { recursive: true, force: true })
+  }
+}
+
 async function shouldRestoreOriginalSnapshotWhenGlobalPatchAndFallbackFail(): Promise<void> {
   const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-hot-apply."))
   try {
@@ -2863,16 +2950,15 @@ async function shouldPreserveConcurrentEditWhenGlobalRollbackConflicts(): Promis
   const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-hot-apply."))
   try {
     // Given
-    const file = path.join(scratch, "opencode.jsonc")
-    const original = '{\n  "agent": {\n    "alpha": {"model": "openai/old"},\n    "beta": {"model": "anthropic/old"}\n  }\n}\n'
-    const external = '{\n  "external": true,\n  "agent": {\n    "alpha": {"model": "openai/external"}\n  }\n}\n'
-    await writeFile(file, original)
+    const file = path.join(scratch, CONFIG_FILE_NAME)
+    await writeFile(file, GLOBAL_CONFIG_BYTES, { mode: CONFIG_FILE_MODE })
     const snapshot = await readConfigSnapshot(file)
+    let patchCalls = 0
     const client = {
       global: {
         config: {
           update: async () => {
-            await writeFile(file, external)
+            patchCalls += 1
             return { error: { name: "BadRequest" }, response: { status: 400 } }
           },
         },
@@ -2883,16 +2969,17 @@ async function shouldPreserveConcurrentEditWhenGlobalRollbackConflicts(): Promis
       { agent: "alpha", before: { model: "openai/old" }, after: { model: "openai/new" }, action: "set" },
       { agent: "beta", before: { model: "anthropic/old" }, after: {}, action: "inherit" },
     ]
-    let preludeOpened = false
+    const hookOccurrences = persistenceHookCounts()
     let failure: unknown
 
     // When
     try {
       await applyConfigChanges(client, "global", runtime, snapshot, changes, {
-        before(step) {
-          if (step !== "temporary-open") return
-          if (preludeOpened) throw new Error("injected fallback failure")
-          preludeOpened = true
+        async before(step) {
+          hookOccurrences[step] += 1
+          if (step !== "temporary-open" || hookOccurrences[step] !== 2) return
+          await writeFile(file, GLOBAL_EXTERNAL_EDIT_BYTES)
+          throw new Error(INJECTED_FALLBACK_FAILURE)
         },
       })
     } catch (error) {
@@ -2902,23 +2989,40 @@ async function shouldPreserveConcurrentEditWhenGlobalRollbackConflicts(): Promis
     // Then
     assert.deepEqual(
       {
-        aggregate: failure instanceof AggregateError,
-        message: failure instanceof Error ? failure.message : undefined,
-        causes: failure instanceof AggregateError
-          ? failure.errors.map((error) => (error instanceof Error ? error.message : String(error)))
-          : [],
-        content: await readFile(file, "utf8"),
-        entries: await readdir(scratch),
+        rejection: {
+          aggregate: failure instanceof AggregateError,
+          message: failure instanceof Error ? failure.message : failure,
+          causes: failure instanceof AggregateError
+            ? failure.errors.map((error) => (error instanceof Error ? error.message : String(error)))
+            : [],
+        },
+        patchCalls,
+        hookOccurrences,
+        bytes: await readFile(file),
+        mode: (await stat(file)).mode & 0o777,
+        entries: (await readdir(scratch)).sort(),
       },
       {
-        aggregate: true,
-        message: `${file} apply failed and the original snapshot could not be restored`,
-        causes: [
-          "injected fallback failure",
-          `${file} rollback conflict: configuration changed after the plugin write; preserving newer content`,
-        ],
-        content: external,
-        entries: ["opencode.jsonc"],
+        rejection: {
+          aggregate: true,
+          message: `${file} apply failed and the original snapshot could not be restored`,
+          causes: [
+            INJECTED_FALLBACK_FAILURE,
+            `${file} rollback conflict: configuration changed after the plugin write; preserving newer content`,
+          ],
+        },
+        patchCalls: 1,
+        hookOccurrences: {
+          "temporary-open": 2,
+          "temporary-write": 1,
+          "temporary-flush": 1,
+          rename: 1,
+          "destination-flush": 1,
+          "post-validate": 1,
+        },
+        bytes: GLOBAL_EXTERNAL_EDIT_BYTES,
+        mode: CONFIG_FILE_MODE,
+        entries: [CONFIG_FILE_NAME],
       },
     )
     pass("shouldPreserveConcurrentEditWhenGlobalRollbackConflicts")
@@ -3226,6 +3330,17 @@ function fixtureChanges(): AgentChange[] {
   ]
 }
 
+function persistenceHookCounts(): Record<PersistenceStep, number> {
+  return {
+    "temporary-open": 0,
+    "temporary-write": 0,
+    "temporary-flush": 0,
+    rename: 0,
+    "destination-flush": 0,
+    "post-validate": 0,
+  }
+}
+
 function pass(name: string): void {
   passes += 1
   process.stdout.write(`PASS ${name}\n`)
@@ -3296,6 +3411,7 @@ await shouldPlanWriteOnlyWhenGlobalChangesAreRemovalOnly()
 await shouldHotApplyProjectScopeByDisposingTheProjectInstance()
 await shouldHotApplyGlobalScopeViaConfigPatchAfterLocalDeletions()
 await shouldFallBackToLocalWriteWhenGlobalPatchFails()
+await shouldRejectWithoutClobberWhenConcurrentEditPrecedesGlobalFallback()
 await shouldRestoreOriginalSnapshotWhenGlobalPatchAndFallbackFail()
 await shouldPreserveConcurrentEditWhenGlobalRollbackConflicts()
 await shouldReportRestartFallbackWhenClientLacksHotApplyRoutes()

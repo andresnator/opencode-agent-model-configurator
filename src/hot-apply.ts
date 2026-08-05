@@ -1,9 +1,11 @@
 import type { AgentChange } from "./domain"
 import {
-  readConfigSnapshot,
-  renderConfigChanges,
-  restoreConfigSnapshot,
+  isConfigWriteConflictError,
+  releaseConfigWriteOwnership,
+  restoreOwnedConfigSnapshot,
   writeConfigChanges,
+  writeConfigChangesFromOwnership,
+  writeConfigChangesWithOwnership,
   type ConfigScope,
   type ConfigSnapshot,
   type PersistenceHooks,
@@ -75,21 +77,37 @@ export async function applyConfigChanges(
     return { file: result.file, hotApplied: false, detail: plan.reason }
   }
 
-  const preludeContent = renderConfigChanges(snapshot, plan.preludeChanges)
-  let preludeWritten = false
+  const ownership = await writeConfigChangesWithOwnership(snapshot, plan.preludeChanges, hooks)
+  let applyCompleted = false
   try {
-    await writeConfigChanges(snapshot, plan.preludeChanges, hooks)
-    preludeWritten = preludeContent !== snapshot.content
     const hot = await patchGlobalConfig(client, plan.patch)
-    if (hot.applied) return { file: snapshot.file, hotApplied: true }
+    if (hot.applied) {
+      applyCompleted = true
+      if (ownership) await releaseConfigWriteOwnership(ownership)
+      return { file: snapshot.file, hotApplied: true }
+    }
 
-    const fresh = await readConfigSnapshot(snapshot.file)
-    const result = await writeConfigChanges(fresh, plan.fallbackChanges, hooks)
+    const result = ownership
+      ? await writeConfigChangesFromOwnership(ownership, plan.fallbackChanges, hooks)
+      : await writeConfigChanges(snapshot, plan.fallbackChanges, hooks)
+    applyCompleted = true
+    if (ownership) await releaseConfigWriteOwnership(ownership)
     return outcome(result.file, hot)
   } catch (error) {
-    if (!preludeWritten) throw error
+    if (!ownership || applyCompleted) throw error
+    if (isConfigWriteConflictError(error)) {
+      try {
+        await releaseConfigWriteOwnership(ownership)
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          `${snapshot.file} apply failed and operation-owned artifacts could not be cleaned`,
+        )
+      }
+      throw error
+    }
     try {
-      await restoreConfigSnapshot(snapshot, preludeContent)
+      await restoreOwnedConfigSnapshot(ownership)
     } catch (rollbackError) {
       throw new AggregateError(
         [error, rollbackError],

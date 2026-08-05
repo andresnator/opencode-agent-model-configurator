@@ -10,6 +10,7 @@ const CONFIG_JSONC = "opencode.jsonc"
 const DEFAULT_FILE_MODE = 0o600
 const PRIVATE_DIRECTORY_MODE = 0o700
 const FORMATTING_OPTIONS: FormattingOptions = { insertSpaces: true, tabSize: 2, eol: "\n" }
+const CONFIG_WRITE_OWNERSHIP = Symbol("config-write-ownership")
 
 export type ConfigScope = "global" | "project"
 
@@ -54,6 +55,30 @@ type WriteState = {
   destinationClaimed: boolean
   claimMatchesSnapshot: boolean
   destinationPublished: boolean
+}
+
+type ConfigWriteOwnershipState = {
+  snapshot: ConfigSnapshot
+  content: string
+  mode: number
+  artifacts: WriteArtifacts
+  active: boolean
+}
+
+export type ConfigWriteOwnership = {
+  readonly file: string
+  readonly [CONFIG_WRITE_OWNERSHIP]: ConfigWriteOwnershipState
+}
+
+type WriteContentOptions = {
+  conflictMessage?: string
+  expectedOwnership?: ConfigWriteOwnership
+  retainOwnership?: boolean
+}
+
+type WriteContentResult = {
+  result: WriteResult
+  ownership?: ConfigWriteOwnership
 }
 
 class ConfigWriteConflictError extends Error {}
@@ -104,11 +129,92 @@ export async function writeConfigChanges(
   changes: readonly AgentChange[],
   hooks: PersistenceHooks = {},
 ): Promise<WriteResult> {
-  if (changes.length === 0) return { file: snapshot.file }
-  const rendered = renderConfigChanges(snapshot, changes)
-  if (rendered === snapshot.content) return { file: snapshot.file }
+  const written = await writeConfigChangesInternal(snapshot, changes, hooks)
+  return written.result
+}
 
-  return writeConfigContent(snapshot, rendered, hooks)
+export async function writeConfigChangesWithOwnership(
+  snapshot: ConfigSnapshot,
+  changes: readonly AgentChange[],
+  hooks: PersistenceHooks = {},
+): Promise<ConfigWriteOwnership | undefined> {
+  const written = await writeConfigChangesInternal(snapshot, changes, hooks, { retainOwnership: true })
+  return written.ownership
+}
+
+export async function writeConfigChangesFromOwnership(
+  ownership: ConfigWriteOwnership,
+  changes: readonly AgentChange[],
+  hooks: PersistenceHooks = {},
+): Promise<WriteResult> {
+  const state = activeOwnership(ownership)
+  const snapshot = { ...state.snapshot, exists: true, content: state.content, mode: state.mode }
+  const written = await writeConfigChangesInternal(snapshot, changes, hooks, { expectedOwnership: ownership })
+  return written.result
+}
+
+export async function releaseConfigWriteOwnership(ownership: ConfigWriteOwnership): Promise<void> {
+  const state = ownership[CONFIG_WRITE_OWNERSHIP]
+  if (!state.active) return
+  await rm(state.artifacts.directory, { recursive: true })
+  state.active = false
+  await syncDirectory(path.dirname(ownership.file))
+}
+
+export async function restoreOwnedConfigSnapshot(ownership: ConfigWriteOwnership): Promise<void> {
+  const state = activeOwnership(ownership)
+  const { snapshot, artifacts, mode } = state
+  const conflictMessage = `${snapshot.file} rollback conflict: configuration changed after the plugin write; preserving newer content`
+  let conflict = false
+
+  try {
+    await rename(snapshot.file, artifacts.recovery)
+  } catch (error) {
+    if (!isMissing(error)) throw error
+    await releaseConfigWriteOwnership(ownership)
+    throw configWriteConflict(snapshot, conflictMessage)
+  }
+
+  if (!(await ownershipMatchesFile(ownership, artifacts.recovery))) {
+    await restoreWithoutClobber(artifacts.recovery, snapshot.file, true)
+    conflict = true
+  } else if (snapshot.exists) {
+    const claimMatchesSnapshot = await matchesSnapshot(artifacts.claim, snapshot, mode)
+    const restored = await restoreWithoutClobber(
+      claimMatchesSnapshot ? artifacts.claim : artifacts.recovery,
+      snapshot.file,
+      false,
+    )
+    conflict = !claimMatchesSnapshot || !restored
+  } else {
+    conflict = await exists(snapshot.file)
+  }
+
+  await releaseConfigWriteOwnership(ownership)
+  if (conflict) throw configWriteConflict(snapshot, conflictMessage)
+}
+
+export function isConfigWriteConflictError(error: unknown): boolean {
+  return error instanceof ConfigWriteConflictError
+}
+
+async function writeConfigChangesInternal(
+  snapshot: ConfigSnapshot,
+  changes: readonly AgentChange[],
+  hooks: PersistenceHooks,
+  options: WriteContentOptions = {},
+): Promise<WriteContentResult> {
+  if (changes.length === 0) {
+    await requireExpectedOwnership(snapshot, options)
+    return { result: { file: snapshot.file } }
+  }
+  const rendered = renderConfigChanges(snapshot, changes)
+  if (rendered === snapshot.content) {
+    await requireExpectedOwnership(snapshot, options)
+    return { result: { file: snapshot.file } }
+  }
+
+  return writeConfigContent(snapshot, rendered, hooks, options)
 }
 
 export async function restoreConfigSnapshot(snapshot: ConfigSnapshot, expectedContent: string): Promise<void> {
@@ -127,17 +233,24 @@ export async function restoreConfigSnapshot(snapshot: ConfigSnapshot, expectedCo
     return
   }
 
-  await writeConfigContent({ ...snapshot, exists: true, content: expectedContent }, snapshot.content, {}, conflictMessage)
+  await writeConfigContent(
+    { ...snapshot, exists: true, content: expectedContent },
+    snapshot.content,
+    {},
+    { conflictMessage },
+  )
 }
 
 async function writeConfigContent(
   snapshot: ConfigSnapshot,
   rendered: string,
   hooks: PersistenceHooks = {},
-  conflictMessage?: string,
-): Promise<WriteResult> {
+  options: WriteContentOptions = {},
+): Promise<WriteContentResult> {
+  const { conflictMessage, expectedOwnership, retainOwnership = false } = options
   const directory = path.dirname(snapshot.file)
   await mkdir(directory, { recursive: true, mode: PRIVATE_DIRECTORY_MODE })
+  await requireExpectedOwnership(snapshot, options)
   if (snapshot.exists) {
     let current: string
     try {
@@ -193,7 +306,12 @@ async function writeConfigContent(
         throw error
       }
       state.destinationClaimed = true
-      state.claimMatchesSnapshot = await matchesSnapshot(artifacts.claim, snapshot, mode)
+      state.claimMatchesSnapshot = await matchesWriteBaseline(
+        artifacts.claim,
+        snapshot,
+        mode,
+        expectedOwnership,
+      )
       if (!state.claimMatchesSnapshot) throw configWriteConflict(snapshot, conflictMessage)
     }
     try {
@@ -217,13 +335,24 @@ async function writeConfigContent(
     }
     if (state.destinationClaimed) {
       state.claimMatchesSnapshot = false
-      state.claimMatchesSnapshot = await matchesSnapshot(artifacts.claim, snapshot, mode)
+      state.claimMatchesSnapshot = await matchesWriteBaseline(
+        artifacts.claim,
+        snapshot,
+        mode,
+        expectedOwnership,
+      )
       if (!state.claimMatchesSnapshot) throw configWriteConflict(snapshot, conflictMessage)
+    }
+    if (retainOwnership) {
+      return {
+        result: { file: snapshot.file },
+        ownership: createConfigWriteOwnership(snapshot, rendered, mode, artifacts),
+      }
     }
     await rm(artifacts.directory, { recursive: true })
     artifactsOwned = false
     await syncDirectory(directory)
-    return { file: snapshot.file }
+    return { result: { file: snapshot.file } }
   } catch (error) {
     if (!artifactsOwned) throw error
     let ownershipLost: boolean
@@ -241,6 +370,58 @@ async function writeConfigContent(
     if (ownershipLost && !(error instanceof ConfigWriteConflictError)) {
       throw configWriteConflict(snapshot, conflictMessage)
     }
+    throw error
+  }
+}
+
+function createConfigWriteOwnership(
+  snapshot: ConfigSnapshot,
+  content: string,
+  mode: number,
+  artifacts: WriteArtifacts,
+): ConfigWriteOwnership {
+  return {
+    file: snapshot.file,
+    [CONFIG_WRITE_OWNERSHIP]: {
+      snapshot: { ...snapshot, mappings: { ...snapshot.mappings } },
+      content,
+      mode,
+      artifacts,
+      active: true,
+    },
+  }
+}
+
+function activeOwnership(ownership: ConfigWriteOwnership): ConfigWriteOwnershipState {
+  const state = ownership[CONFIG_WRITE_OWNERSHIP]
+  if (!state.active) throw new Error(`${ownership.file} write ownership is no longer active`)
+  return state
+}
+
+async function requireExpectedOwnership(snapshot: ConfigSnapshot, options: WriteContentOptions): Promise<void> {
+  if (!options.expectedOwnership) return
+  if (!(await ownershipMatchesFile(options.expectedOwnership, snapshot.file))) {
+    throw configWriteConflict(snapshot, options.conflictMessage)
+  }
+}
+
+async function matchesWriteBaseline(
+  file: string,
+  snapshot: ConfigSnapshot,
+  mode: number,
+  expectedOwnership?: ConfigWriteOwnership,
+): Promise<boolean> {
+  return expectedOwnership
+    ? ownershipMatchesFile(expectedOwnership, file)
+    : matchesSnapshot(file, snapshot, mode)
+}
+
+async function ownershipMatchesFile(ownership: ConfigWriteOwnership, file: string): Promise<boolean> {
+  const state = activeOwnership(ownership)
+  try {
+    return await isOwnedPublication(state.artifacts.temporary, file, state.content, state.mode)
+  } catch (error) {
+    if (isMissing(error)) return false
     throw error
   }
 }
