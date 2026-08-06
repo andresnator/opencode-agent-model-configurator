@@ -27,7 +27,9 @@ List every focused or manual scenario that must pass before merge. Copy the bloc
 
 <!-- Check every applicable item. For an item that does not apply, check it and add "N/A — <reason>". -->
 
-- [ ] `npm run check` completed successfully.
+- [ ] The title follows `type(scope)!: description` with an allowed Conventional Commit type.
+- [ ] `pnpm run check` completed successfully.
+- [ ] `pnpm run security:check` completed successfully.
 - [ ] Required CI checks pass on Ubuntu and macOS.
 - [ ] Observable behavior changes have contract coverage, or `N/A` is justified.
 - [ ] Every required manual scenario above was executed and its evidence recorded.
@@ -35,6 +37,6 @@ List every focused or manual scenario that must pass before merge. Copy the bloc
 - [ ] Failure, concurrency, and recovery behavior was considered when applicable.
 - [ ] The diff contains no secrets, machine-specific paths, temporary files, or local-only data.
 
-## Documentation or Changeset effect
+## Documentation or release effect
 
-<!-- List updated documentation or a Changeset. If neither is needed, explain why. -->
+<!-- List updated documentation and whether this should produce a release. If neither applies, explain why. -->

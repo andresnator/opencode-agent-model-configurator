@@ -4,12 +4,13 @@ Choose and review model and variant assignments for every agent visible to your 
 
 ## Quick path
 
-This is the temporary distribution route: the plugin is not available on npm, so load the exact `v0.1.0` Git tag from a retained local checkout.
+This is the temporary distribution route: the plugin is not available on npm, so choose a published `vX.Y.Z` tag from [GitHub Releases](https://github.com/andresnator/opencode-agent-model-configurator/releases) and retain its local checkout.
 
 1. Confirm that Git is installed and OpenCode is `>=1.17.15 <2`.
-2. Clone the pinned tag:
+2. Replace the placeholder with the release tag you selected, then clone it:
    ```bash
-   git clone --branch v0.1.0 --depth 1 https://github.com/andresnator/opencode-agent-model-configurator.git
+   RELEASE_TAG=vX.Y.Z
+   git clone --branch "$RELEASE_TAG" --depth 1 https://github.com/andresnator/opencode-agent-model-configurator.git
    ```
 3. Enter the checkout:
    ```bash
