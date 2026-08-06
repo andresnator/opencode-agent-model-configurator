@@ -26,12 +26,12 @@ assert.equal(plugin.default?.id, "andresnator.agent-model-configurator")
 assert.equal(typeof plugin.default?.tui, "function")
 assert.equal("server" in plugin.default, false, "TUI entry must not also export a server plugin")
 
-const packed = spawnSync("npm", ["pack", "--dry-run", "--ignore-scripts", "--json"], {
+const packed = spawnSync("pnpm", ["pack", "--dry-run", "--json"], {
   cwd: root,
   encoding: "utf8",
 })
 assert.equal(packed.status, 0, packed.stderr || packed.stdout)
-const report = JSON.parse(packed.stdout)[0]
+const report = JSON.parse(packed.stdout)
 const files = new Set(report.files.map((entry) => entry.path))
 for (const required of ["dist/tui.js", "dist/tui.d.ts", "README.md", "LICENSE", "NOTICE.md", "schemas/profile.schema.json"]) {
   assert.ok(files.has(required), `package is missing ${required}`)
