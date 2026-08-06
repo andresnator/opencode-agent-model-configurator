@@ -10,12 +10,27 @@ permissions:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    name: check (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: ubuntu
+            os: ubuntu-latest
+          - platform: macos
+            os: macos-latest
+    runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
-      - run: npm ci
-      - run: npm run check
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Run complete repository check
+        run: npm run check
+      - name: Verify committed distribution
+        run: git diff --exit-code -- dist
