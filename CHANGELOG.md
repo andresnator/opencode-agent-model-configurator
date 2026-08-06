@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/andresnator/opencode-agent-model-configurator/compare/v0.1.0...v0.1.1) (2026-08-06)
+
+
+### Dependencies
+
+* bump @types/node from 24.13.3 to 26.1.2 ([#6](https://github.com/andresnator/opencode-agent-model-configurator/issues/6)) ([782b1e7](https://github.com/andresnator/opencode-agent-model-configurator/commit/782b1e7d6dd461a54b17eeccb87077469347a2bd))
+
 ## 0.1.0 - 2026-08-04
 
 - Extract the model configurator from `agents-orchestrator`.
