@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
   "name": "opencode-agent-model-configurator",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "packageManager": "pnpm@10.34.5",
   "description": "Provider-agnostic OpenCode TUI plugin for assigning models and variants to agents.",
   "license": "MIT",
