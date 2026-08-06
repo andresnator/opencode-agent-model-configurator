@@ -2,10 +2,6 @@
 
 <!-- What does this pull request change, and why? -->
 
-## Public impact
-
-<!-- Describe user- or contributor-facing contract changes. Write "None" when there is no public impact. -->
-
 ## Test scenarios
 
 <!--
@@ -31,14 +27,11 @@ List every focused or manual scenario that must pass before merge. Copy the bloc
 
 <!-- Check every applicable item. For an item that does not apply, check it and add "N/A — <reason>". -->
 
-- [ ] The change is focused and contains no unrelated modifications.
 - [ ] `npm run check` completed successfully.
 - [ ] Required CI checks pass on Ubuntu and macOS.
 - [ ] Observable behavior changes have contract coverage, or `N/A` is justified.
-- [ ] Committed `dist/` artifacts were regenerated and match the source.
 - [ ] Every required manual scenario above was executed and its evidence recorded.
-- [ ] Public impact and compatibility implications are described.
-- [ ] Documentation, schemas, examples, and changelog are aligned, or `N/A` is justified.
+- [ ] Documentation was updated or created when needed.
 - [ ] Failure, concurrency, and recovery behavior was considered when applicable.
 - [ ] The diff contains no secrets, machine-specific paths, temporary files, or local-only data.
 
