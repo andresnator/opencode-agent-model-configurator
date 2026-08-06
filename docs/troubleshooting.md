@@ -15,7 +15,7 @@ Start with the message or missing behavior you can see. Normal scope, file, prof
 1. Open the `tui.json` used by OpenCode and confirm its plugin entry points to the retained checkout's current absolute path.
 2. If the checkout moved, restore it at that path or [remove the stale registration](#remove-or-reset-the-plugin-deliberately) before registering another path.
 3. Restart OpenCode and try either entry point from the README [Quick path](../README.md#quick-path).
-4. If the checkout is missing or damaged, repeat that pinned-`v0.1.0` source-tag route and retain the new checkout.
+4. If the checkout is missing or damaged, repeat that pinned-`vX.Y.Z` release-tag route and retain the new checkout.
 
 The README owns the registration commands; this page does not provide a second installation route.
 

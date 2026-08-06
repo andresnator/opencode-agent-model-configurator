@@ -1,0 +1,27 @@
+packages:
+  - .
+
+overrides:
+  '@babel/core': 7.29.7
+
+auditLevel: low
+minimumReleaseAge: 1440
+trustPolicy: no-downgrade
+# These exact versions pass npm's registry-signature audit but cannot be
+# compared reliably by pnpm's trust-history policy.
+trustPolicyExclude:
+  - effect@4.0.0-beta.83
+  - semver@6.3.1
+blockExoticSubdeps: true
+strictDepBuilds: true
+# esbuild's platform installer is required; optional native accelerators are
+# deliberately blocked because this repository does not need them.
+allowBuilds:
+  esbuild@0.28.1: true
+  msgpackr-extract@3.0.4: false
+  fsevents@2.3.3: false
+packageManagerStrict: true
+packageManagerStrictVersion: true
+verifyDepsBeforeRun: error
+engineStrict: true
+nodeVersion: 22.23.2
