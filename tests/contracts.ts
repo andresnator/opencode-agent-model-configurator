@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import crypto from "node:crypto"
 import { writeFileSync } from "node:fs"
-import { mkdir, mkdtemp, open, readFile, readdir, rm, stat, writeFile, type FileHandle } from "node:fs/promises"
+import { mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat, writeFile, type FileHandle } from "node:fs/promises"
 import { syncBuiltinESMExports } from "node:module"
 import { homedir, tmpdir } from "node:os"
 import path from "node:path"
@@ -49,6 +49,7 @@ import type {
 const ROOT = path.resolve(import.meta.dirname, "..")
 const FIXTURES = path.join(ROOT, "tests", "fixtures")
 const CONFIG_FILE_NAME = "opencode.jsonc"
+const CONFIG_SUBSTITUTE_FILE_NAME = "opencode.substitute.jsonc"
 const CONFIG_FILE_MODE = 0o640
 const CONFIG_BEFORE_BYTES = await readFile(path.join(FIXTURES, "config-before.jsonc"))
 const CONFIG_AFTER_BYTES = await readFile(path.join(FIXTURES, "config-after.jsonc"))
@@ -466,10 +467,12 @@ async function shouldRejectIdenticalStateDifferentInodeAtClaimCheckpoint(): Prom
   try {
     // Given
     const file = path.join(scratch, CONFIG_FILE_NAME)
+    const substitute = path.join(scratch, CONFIG_SUBSTITUTE_FILE_NAME)
     await writeFile(file, CONFIG_BEFORE_BYTES, { mode: CONFIG_FILE_MODE })
+    await writeFile(substitute, CONFIG_BEFORE_BYTES, { mode: CONFIG_FILE_MODE })
     const reviewedIdentity = await stat(file)
     const snapshot = await readConfigSnapshot(file)
-    let substitutedIdentity: Awaited<ReturnType<typeof stat>> | undefined
+    const substitutedIdentity = await stat(substitute)
     let bytesBeforeSubstitution: Buffer | undefined
     let bytesAfterSubstitution: Buffer | undefined
     let failure: unknown
@@ -481,8 +484,7 @@ async function shouldRejectIdenticalStateDifferentInodeAtClaimCheckpoint(): Prom
           if (step !== "rename") return
           bytesBeforeSubstitution = await readFile(file)
           await rm(file)
-          await writeFile(file, CONFIG_BEFORE_BYTES, { mode: CONFIG_FILE_MODE })
-          substitutedIdentity = await stat(file)
+          await rename(substitute, file)
           bytesAfterSubstitution = await readFile(file)
         },
       })
@@ -499,12 +501,8 @@ async function shouldRejectIdenticalStateDifferentInodeAtClaimCheckpoint(): Prom
         bytesAfterSubstitution,
         finalBytes: await readFile(file),
         finalMode: finalDestinationIdentity.mode & 0o777,
-        substitutionChangedIdentity: substitutedIdentity
-          ? !sameFileIdentity(reviewedIdentity, substitutedIdentity)
-          : false,
-        substitutedIdentityPreserved: substitutedIdentity
-          ? sameFileIdentity(substitutedIdentity, finalDestinationIdentity)
-          : false,
+        substitutionChangedIdentity: !sameFileIdentity(reviewedIdentity, substitutedIdentity),
+        substitutedIdentityPreserved: sameFileIdentity(substitutedIdentity, finalDestinationIdentity),
         entries: (await readdir(scratch)).sort(),
       },
       {
