@@ -96,7 +96,7 @@ type WizardStep = {
 
 export async function runModelConfigurator(api: TuiPluginApi, profilesRoot: string): Promise<void> {
   if (configuratorRunning) {
-    api.ui.toast({ variant: "warning", message: "The model configurator is already open." })
+    api.ui.toast({ variant: "warning", message: "Model presets are already open." })
     return
   }
   configuratorRunning = true
@@ -127,7 +127,7 @@ export async function runModelConfigurator(api: TuiPluginApi, profilesRoot: stri
       presetStorageAvailable = false
       api.ui.toast({
         variant: "warning",
-        message: `Preset storage unavailable at ${presetsPath}: ${errorMessage(error)} Repair the file and reopen the configurator.`,
+        message: `Preset storage unavailable at ${presetsPath}: ${errorMessage(error)} Repair the file and reopen model presets.`,
       })
     }
 
@@ -141,7 +141,7 @@ export async function runModelConfigurator(api: TuiPluginApi, profilesRoot: stri
     const state: WizardState = { agents, profiles, presets, presetStorageAvailable, models, presetsPath, showHidden: false }
     await runSteps(api, state)
   } catch (error) {
-    api.ui.toast({ variant: "error", title: "Model configurator failed", message: errorMessage(error), duration: 8000 })
+    api.ui.toast({ variant: "error", title: "Model presets failed", message: errorMessage(error), duration: 8000 })
   } finally {
     api.ui.dialog.clear()
     api.ui.dialog.setSize(previousDialogSize)
@@ -546,7 +546,7 @@ async function runReviewStep(api: TuiPluginApi, state: WizardState): Promise<Ste
       {
         title: "Apply and save as preset",
         value: APPLY_SAVE,
-        description: state.presetStorageAvailable ? undefined : "Repair preset storage and reopen the configurator to enable saving.",
+        description: state.presetStorageAvailable ? undefined : "Repair preset storage and reopen model presets to enable saving.",
         disabled: !state.presetStorageAvailable,
       },
       { title: "Cancel", value: CANCEL },
@@ -814,5 +814,5 @@ function prompt(api: TuiPluginApi, title: string, placeholder: string): Promise<
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "Unknown model configurator error"
+  return error instanceof Error ? error.message : "Unknown model presets error"
 }

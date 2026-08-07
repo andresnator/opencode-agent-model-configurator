@@ -1,6 +1,6 @@
 # Configure agent models safely
 
-Choose a scope, review the complete change set, and apply it. The configurator writes only the selected agent assignments and reports whether the current OpenCode server applied them live. For a failure, go to [Troubleshoot by symptom](troubleshooting.md#troubleshoot-by-symptom).
+Choose a scope, review the complete change set, and apply it. Models Presets writes only the selected agent assignments and reports whether the current OpenCode server applied them live. For a failure, go to [Troubleshoot by symptom](troubleshooting.md#troubleshoot-by-symptom).
 
 ## Choose a scope and destination
 
@@ -11,7 +11,7 @@ The scope controls which OpenCode configuration file receives the assignments.
 | Project | `.opencode/opencode.jsonc` when it exists; otherwise `.opencode/opencode.json` in the active project | Applies to that project |
 | Global | `opencode.jsonc` when it exists; otherwise `opencode.json` in the effective global OpenCode configuration directory | Applies as the global default |
 
-If neither destination exists, the configurator creates `opencode.json`. It prefers an existing JSONC file when both filename forms are present and shows the resolved destination in the scope chooser.
+If neither destination exists, the plugin creates `opencode.json`. It prefers an existing JSONC file when both filename forms are present and shows the resolved destination in the scope chooser.
 
 The effective global directory comes from OpenCode. Its fallback is `$XDG_CONFIG_HOME/opencode`, or `~/.config/opencode` when `XDG_CONFIG_HOME` is not set.
 
@@ -48,9 +48,9 @@ Start from the [published profile example](../examples/profiles/team.example.jso
 
 Presets store concrete agent, model, and optional variant assignments in `model-configurator-presets.json` under the effective global OpenCode configuration directory. They are separate from profiles and can be selected after either scope is chosen.
 
-Before applying a preset, the configurator checks its assignments against the live agents, connected providers, models, and variants. It identifies stale entries and skips them before applying any valid remainder. It does not silently delete the saved preset.
+Before applying a preset, the plugin checks its assignments against the live agents, connected providers, models, and variants. It identifies stale entries and skips them before applying any valid remainder. It does not silently delete the saved preset.
 
-Immediately before the final write, the configurator reloads the model catalog. If a pending model or variant has become stale, it stops without writing and asks you to reopen the configurator and select again. For storage or stale-entry recovery, see [A preset cannot be loaded or applied](troubleshooting.md#a-preset-cannot-be-loaded-or-applied).
+Immediately before the final write, the plugin reloads the model catalog. If a pending model or variant has become stale, it stops without writing and asks you to reopen Models Presets and select again. For storage or stale-entry recovery, see [A preset cannot be loaded or applied](troubleshooting.md#a-preset-cannot-be-loaded-or-applied).
 
 ## Understand environment precedence
 
@@ -65,15 +65,15 @@ If the written assignment is not the value OpenCode uses, follow [Environment va
 | Project or global OpenCode configuration | Writes targeted `agent.<name>.model` and `agent.<name>.variant` values; preserves unrelated JSONC keys, comments, and file mode |
 | Global preset store | Writes saved concrete assignments to `model-configurator-presets.json` |
 | Profile files | Reads them as optional input; does not write them |
-| `tui.json` | Reads the plugin registration and `profilesDir` option; the configurator does not edit it |
+| `tui.json` | Reads the plugin registration and `profilesDir` option; Models Presets does not edit it |
 
-The configurator writes model identifiers and variants; it never writes provider credentials.
+Models Presets writes model identifiers and variants; it never writes provider credentials.
 
 ### Assignment write guarantees
 
 Assignment configuration writes are atomic and protected against concurrent edits:
 
-1. Before writing, the configurator compares the destination with the snapshot opened by the wizard. If the file changed or appeared in the meantime, it aborts instead of overwriting newer content.
+1. Before writing, the plugin compares the destination with the snapshot opened by the wizard. If the file changed or appeared in the meantime, it aborts instead of overwriting newer content.
 2. It writes and flushes a temporary file, atomically replaces the destination, preserves the destination mode, and validates the persisted content.
 3. If persistence fails after the transaction starts, recovery restores the previous content or removes a destination created by the failed attempt.
 

@@ -1,31 +1,28 @@
-# OpenCode Agent Model Configurator
+# OpenCode Models Presets
 
-Choose and review model and variant assignments for every agent visible to your running OpenCode server. The plugin uses live agents, providers, models, and variants, then writes only the changes you approve.
+Choose and review model, variant, and preset assignments for every agent visible to your running OpenCode server. The plugin uses live agents, providers, models, and variants, then writes only the changes you approve.
 
-## Quick path
+## Install the latest release
 
-This is the temporary distribution route: the plugin is not available on npm, so choose a published `vX.Y.Z` tag from [GitHub Releases](https://github.com/andresnator/opencode-agent-model-configurator/releases) and retain its local checkout.
+The plugin is not available on npm. Confirm that `curl`, Git, and OpenCode `>=1.17.15 <2` are installed, then copy and run this complete command:
 
-1. Confirm that Git is installed and OpenCode is `>=1.17.15 <2`.
-2. Replace the placeholder with the release tag you selected, then clone it:
-   ```bash
-   RELEASE_TAG=vX.Y.Z
-   git clone --branch "$RELEASE_TAG" --depth 1 https://github.com/andresnator/opencode-agent-model-configurator.git
-   ```
-3. Enter the checkout:
-   ```bash
-   cd opencode-agent-model-configurator
-   ```
-4. Register that local path globally:
-   ```bash
-   opencode plugin "$PWD" --global
-   ```
-5. Keep the cloned directory at that path and restart OpenCode.
-6. Press `Ctrl+P` and choose **Configure agent models**, or run `/model-configurator`. Success means **Configure agent models** is available and the configurator opens.
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/andresnator/opencode-agent-model-configurator/main/scripts/install.sh -o /tmp/opencode-models-presets-install.sh && sh /tmp/opencode-models-presets-install.sh latest
+```
+
+`latest` resolves to the highest published `vX.Y.Z` release tag. The installer clones or updates that release at `/tmp/opencode-models-presets`, then registers the retained path globally with OpenCode. To install a specific release, replace `latest` with its published tag; older releases retain the names and commands documented in that release. Set `MODELS_PRESETS_INSTALL_DIR` to an absolute path before running the command if `/tmp/opencode-models-presets` is not suitable.
+
+Keep the cloned directory in place because OpenCode records its path in `tui.json`. If the operating system clears `/tmp`, rerun the command. Restart OpenCode, press `Ctrl+P`, and confirm that **models-presets** is active; then choose **Configure model presets** or run `/models-presets`.
 
 ### Load an existing checkout
 
-To exercise code already checked out for development, start at that checkout's repository root, use the registration action in step 4, then follow steps 5–6. This route does not clone or switch the checkout revision.
+To exercise code already checked out for development, start at that checkout's repository root and run the complete registration command:
+
+```bash
+opencode plugin "$PWD" --global --force
+```
+
+Keep the checkout at that path, restart OpenCode, and use **Configure model presets** or `/models-presets`. This route does not clone or switch the checkout revision.
 
 ## Configuration flow
 
@@ -48,7 +45,7 @@ For scope destinations, assignment actions, profiles, presets, and environment p
 
 ## Safety and recovery
 
-The configurator shows the full change set before writing, preserves unrelated JSONC content, and protects assignment writes against concurrent edits and persistence failures. Read the [assignment write guarantees](docs/configuration.md#assignment-write-guarantees) for the canonical safety contract.
+The plugin shows the full change set before writing, preserves unrelated JSONC content, and protects assignment writes against concurrent edits and persistence failures. Read the [assignment write guarantees](docs/configuration.md#assignment-write-guarantees) for the canonical safety contract.
 
 For loading, command, catalog, profile, preset, write, reload, or deliberate-removal problems, [troubleshoot by symptom](docs/troubleshooting.md#troubleshoot-by-symptom).
 

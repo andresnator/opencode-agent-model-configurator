@@ -5,6 +5,7 @@ import { TextDecoder } from "node:util"
 import type { ModelOption } from "./domain"
 import { globalConfigRoot, type RuntimePaths } from "./persistence"
 
+// Keep the legacy filename so the public rename does not orphan saved presets.
 const PRESETS_FILE = "model-configurator-presets.json"
 const PRESETS_VERSION = 1
 const DEFAULT_FILE_MODE = 0o600

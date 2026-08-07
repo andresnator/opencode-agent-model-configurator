@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/andresnator/opencode-agent-model-configurator/main/schemas/profile.schema.json",
-  "title": "OpenCode Agent Model Configurator profile",
+  "title": "OpenCode Models Presets profile",
   "type": "object",
   "required": ["tiers"],
   "properties": {

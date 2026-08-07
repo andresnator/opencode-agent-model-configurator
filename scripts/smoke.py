@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Open the real model-configurator scope dialog in an isolated OpenCode PTY."""
+"""Open the real models-presets scope dialog in an isolated OpenCode PTY."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from pathlib import Path
 
 ANSI = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|P[^\x1b]*(?:\x1b\\))")
 SCOPE_TITLE = "Configuration scope"
-FAILURE_TITLE = "Model configurator failed"
+FAILURE_TITLE = "Model presets failed"
 
 
 def parse_args() -> argparse.Namespace:
@@ -57,7 +57,7 @@ def main() -> int:
             rendered = visible(output)
             elapsed = time.monotonic() - started
             if not typed and elapsed >= 8:
-                os.write(descriptor, b"/model-configurator")
+                os.write(descriptor, b"/models-presets")
                 typed = True
             if typed and not submitted and elapsed >= 10:
                 os.write(descriptor, b"\r")

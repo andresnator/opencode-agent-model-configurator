@@ -3,9 +3,9 @@ import { resolveProfilesRoot } from "./domain"
 import { normalizePluginOptions } from "./options"
 import { runModelConfigurator } from "./wizard"
 
-export const MODEL_CONFIGURATOR_PLUGIN_ID = "andresnator.agent-model-configurator"
-export const MODEL_CONFIGURATOR_COMMAND_ID = "andresnator.agent-model-configurator.open"
-export const MODEL_CONFIGURATOR_SLASH_NAME = "model-configurator"
+export const MODELS_PRESETS_PLUGIN_ID = "models-presets"
+export const MODELS_PRESETS_COMMAND_ID = "models-presets.open"
+export const MODELS_PRESETS_SLASH_NAME = "models-presets"
 export const MINIMUM_OPENCODE_VERSION = "1.17.15"
 
 const tui: TuiPlugin = async (api, rawOptions) => {
@@ -14,19 +14,19 @@ const tui: TuiPlugin = async (api, rawOptions) => {
   api.keymap.registerLayer({
     commands: [
       {
-        name: MODEL_CONFIGURATOR_COMMAND_ID,
-        title: "Configure agent models",
-        desc: "Assign OpenCode models and variants by tier or agent",
-        category: "Agent Models",
+        name: MODELS_PRESETS_COMMAND_ID,
+        title: "Configure model presets",
+        desc: "Assign models and variants by agent or reuse a saved preset",
+        category: "Model Presets",
         namespace: "palette",
-        slashName: MODEL_CONFIGURATOR_SLASH_NAME,
+        slashName: MODELS_PRESETS_SLASH_NAME,
         run() {
           void resolveProfilesRoot(import.meta.url, options.profilesDir, api.state.path.directory)
             .then((profilesRoot) => runModelConfigurator(api, profilesRoot))
             .catch((error) => {
               api.ui.toast({
                 variant: "error",
-                title: "Model configurator failed",
+                title: "Model presets failed",
                 message: String(error instanceof Error ? error.message : error),
                 duration: 8000,
               })
@@ -38,7 +38,7 @@ const tui: TuiPlugin = async (api, rawOptions) => {
 }
 
 const plugin: TuiPluginModule & { id: string } = {
-  id: MODEL_CONFIGURATOR_PLUGIN_ID,
+  id: MODELS_PRESETS_PLUGIN_ID,
   tui,
 }
 
