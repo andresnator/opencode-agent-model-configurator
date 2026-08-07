@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.0](https://github.com/andresnator/opencode-agent-model-configurator/compare/v0.1.2...v0.2.0) (2026-08-07)
+
+
+### ⚠ BREAKING CHANGES
+
+* rename plugin to models-presets with latest install ([#9](https://github.com/andresnator/opencode-agent-model-configurator/issues/9))
+
+### Features
+
+* rename plugin to models-presets with latest install ([#9](https://github.com/andresnator/opencode-agent-model-configurator/issues/9)) ([434b422](https://github.com/andresnator/opencode-agent-model-configurator/commit/434b4221ef908bd7b212d1563750a8a2f1c79b8d))
+
 ## [0.1.2](https://github.com/andresnator/opencode-agent-model-configurator/compare/v0.1.1...v0.1.2) (2026-08-06)
 
 
