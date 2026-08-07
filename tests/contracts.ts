@@ -37,12 +37,18 @@ import {
   savePreset,
 } from "../src/presets"
 import { normalizePluginOptions } from "../src/options"
+import modelsPresetsPlugin, {
+  MODELS_PRESETS_COMMAND_ID,
+  MODELS_PRESETS_PLUGIN_ID,
+  MODELS_PRESETS_SLASH_NAME,
+} from "../src/tui"
 import { runModelConfigurator } from "../src/wizard"
 import type {
   TuiDialogConfirmProps,
   TuiDialogPromptProps,
   TuiDialogSelectProps,
   TuiPluginApi,
+  TuiPluginMeta,
   TuiToast,
 } from "@opencode-ai/plugin/tui"
 
@@ -91,6 +97,41 @@ const PERSISTENCE_STEPS: PersistenceStep[] = [
 const CORRUPTED_PRESET_BYTES = "not valid preset storage after startup\n"
 
 let passes = 0
+
+async function shouldRegisterModelsPresetsNamesWhenTuiLoads(): Promise<void> {
+  // Given
+  const layers: unknown[] = []
+  const api = {
+    keymap: {
+      registerLayer(layer: unknown) {
+        layers.push(layer)
+      },
+    },
+  } as unknown as TuiPluginApi
+
+  // When
+  await modelsPresetsPlugin.tui(api, undefined, {} as TuiPluginMeta)
+
+  // Then
+  assert.equal(modelsPresetsPlugin.id, MODELS_PRESETS_PLUGIN_ID)
+  assert.equal(MODELS_PRESETS_PLUGIN_ID, "models-presets")
+  assert.equal(layers.length, 1)
+  const layer = layers[0] as { commands: Array<Record<string, unknown>> }
+  assert.equal(layer.commands.length, 1)
+  const { run, ...command } = layer.commands[0]
+  assert.equal(typeof run, "function")
+  assert.deepEqual(command, {
+    name: MODELS_PRESETS_COMMAND_ID,
+    title: "Configure model presets",
+    desc: "Assign models and variants by agent or reuse a saved preset",
+    category: "Model Presets",
+    namespace: "palette",
+    slashName: MODELS_PRESETS_SLASH_NAME,
+  })
+  assert.equal(MODELS_PRESETS_COMMAND_ID, "models-presets.open")
+  assert.equal(MODELS_PRESETS_SLASH_NAME, "models-presets")
+  pass("shouldRegisterModelsPresetsNamesWhenTuiLoads")
+}
 
 async function shouldNormalizeProfilesDirectoryWhenPluginOptionsAreProvided(): Promise<void> {
   // Given
@@ -1537,7 +1578,7 @@ async function shouldKeepCoreApplyAndReportPresetSaveFailureWhenStorageBecomesIn
     assert.equal(errors[0]?.title, "Preset not saved")
     assert.match(errors[0]?.message ?? "", /Invalid preset storage/)
     assert.equal(toasts.some((toast) => toast.message?.includes('Saved preset "')), false)
-    assert.equal(toasts.some((toast) => toast.title === "Model configurator failed"), false)
+    assert.equal(toasts.some((toast) => toast.title === "Model presets failed"), false)
     assert.deepEqual((await readConfigSnapshot(configFile)).mappings, {
       alpha: { model: "openai/new", variant: "high" },
       beta: { model: "anthropic/old", variant: undefined },
@@ -4363,6 +4404,7 @@ function pass(name: string): void {
   process.stdout.write(`PASS ${name}\n`)
 }
 
+await shouldRegisterModelsPresetsNamesWhenTuiLoads()
 await shouldNormalizeProfilesDirectoryWhenPluginOptionsAreProvided()
 await shouldResolveConfiguredProfilesDirectoryRelativeToActiveProject()
 await shouldResolveSlashAndBackslashTildeProfilesDirectoriesFromHome()
@@ -4444,4 +4486,4 @@ await shouldRestoreHeldDescriptorEditWhenGlobalRollbackFindsMutatedClaim()
 await shouldReportRestartFallbackWhenClientLacksHotApplyRoutes()
 await shouldToastLiveApplyWhenProjectInstanceDisposalSucceeds()
 await shouldShortenConfigFilePathsForDisplay()
-process.stdout.write(`PASS: ${passes} TypeScript model configurator contracts.\n`)
+process.stdout.write(`PASS: ${passes} TypeScript Models Presets contracts.\n`)

@@ -1,9 +1,9 @@
 {
   "$schema": "https://json.schemastore.org/package.json",
-  "name": "opencode-agent-model-configurator",
+  "name": "opencode-models-presets",
   "version": "0.1.2",
   "packageManager": "pnpm@10.34.5",
-  "description": "Provider-agnostic OpenCode TUI plugin for assigning models and variants to agents.",
+  "description": "Provider-agnostic OpenCode TUI plugin for assigning models, variants, and presets to agents.",
   "license": "MIT",
   "type": "module",
   "exports": {
@@ -23,7 +23,7 @@
   "scripts": {
     "build": "node scripts/build.mjs && tsc -p tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "tsx tests/contracts.ts && node tests/validate-pr-title.test.mjs && node tests/release-policy.test.mjs",
+    "test": "tsx tests/contracts.ts && node tests/validate-pr-title.test.mjs && node tests/release-policy.test.mjs && node tests/install.test.mjs",
     "verify:package": "node scripts/verify-package.mjs",
     "verify:workflows": "node scripts/verify-workflow-actions.mjs",
     "security:audit": "pnpm audit --audit-level=low",
@@ -65,6 +65,7 @@
     "tui",
     "agents",
     "models",
+    "presets",
     "variants"
   ]
 }

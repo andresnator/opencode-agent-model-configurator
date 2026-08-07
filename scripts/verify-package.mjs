@@ -8,7 +8,7 @@ const packageJson = JSON.parse(await readFile(new URL("package.json", root), "ut
 const bundleUrl = new URL("dist/tui.js", root)
 const bundle = await readFile(bundleUrl, "utf8")
 
-assert.equal(packageJson.name, "opencode-agent-model-configurator")
+assert.equal(packageJson.name, "opencode-models-presets")
 assert.equal(packageJson.dependencies, undefined, "published package must not have runtime dependencies")
 assert.equal(packageJson.exports?.["./tui"]?.import, "./dist/tui.js")
 assert.equal(packageJson.engines?.opencode, ">=1.17.15 <2")
@@ -22,7 +22,7 @@ assert.deepEqual(
 )
 
 const plugin = await import(pathToFileURL(bundleUrl.pathname).href)
-assert.equal(plugin.default?.id, "andresnator.agent-model-configurator")
+assert.equal(plugin.default?.id, "models-presets")
 assert.equal(typeof plugin.default?.tui, "function")
 assert.equal("server" in plugin.default, false, "TUI entry must not also export a server plugin")
 

@@ -7,7 +7,7 @@ function shouldAcceptSupportedConventionalTitlesWhenSyntaxIsValid() {
     "fix: correct preset persistence",
     "feat(ui): add model filters",
     "feat!: remove the legacy profile shape",
-    "chore(main): release opencode-agent-model-configurator 0.1.1",
+    "chore(main): release opencode-models-presets 0.2.0",
     "deps: update development dependencies",
   ]
 

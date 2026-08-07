@@ -2680,7 +2680,7 @@ var OTHER_GROUP_TITLE = "Other subagents";
 var configuratorRunning = false;
 async function runModelConfigurator(api, profilesRoot) {
   if (configuratorRunning) {
-    api.ui.toast({ variant: "warning", message: "The model configurator is already open." });
+    api.ui.toast({ variant: "warning", message: "Model presets are already open." });
     return;
   }
   configuratorRunning = true;
@@ -2709,7 +2709,7 @@ async function runModelConfigurator(api, profilesRoot) {
       presetStorageAvailable = false;
       api.ui.toast({
         variant: "warning",
-        message: `Preset storage unavailable at ${presetsPath}: ${errorMessage(error)} Repair the file and reopen the configurator.`
+        message: `Preset storage unavailable at ${presetsPath}: ${errorMessage(error)} Repair the file and reopen model presets.`
       });
     }
     const catalog = await loadCatalog(api);
@@ -2721,7 +2721,7 @@ async function runModelConfigurator(api, profilesRoot) {
     const state = { agents, profiles, presets, presetStorageAvailable, models, presetsPath, showHidden: false };
     await runSteps(api, state);
   } catch (error) {
-    api.ui.toast({ variant: "error", title: "Model configurator failed", message: errorMessage(error), duration: 8e3 });
+    api.ui.toast({ variant: "error", title: "Model presets failed", message: errorMessage(error), duration: 8e3 });
   } finally {
     api.ui.dialog.clear();
     api.ui.dialog.setSize(previousDialogSize);
@@ -3092,7 +3092,7 @@ async function runReviewStep(api, state) {
       {
         title: "Apply and save as preset",
         value: APPLY_SAVE,
-        description: state.presetStorageAvailable ? void 0 : "Repair preset storage and reopen the configurator to enable saving.",
+        description: state.presetStorageAvailable ? void 0 : "Repair preset storage and reopen model presets to enable saving.",
         disabled: !state.presetStorageAvailable
       },
       { title: "Cancel", value: CANCEL },
@@ -3319,30 +3319,30 @@ function prompt(api, title, placeholder) {
   });
 }
 function errorMessage(error) {
-  return error instanceof Error ? error.message : "Unknown model configurator error";
+  return error instanceof Error ? error.message : "Unknown model presets error";
 }
 
 // src/tui.tsx
-var MODEL_CONFIGURATOR_PLUGIN_ID = "andresnator.agent-model-configurator";
-var MODEL_CONFIGURATOR_COMMAND_ID = "andresnator.agent-model-configurator.open";
-var MODEL_CONFIGURATOR_SLASH_NAME = "model-configurator";
+var MODELS_PRESETS_PLUGIN_ID = "models-presets";
+var MODELS_PRESETS_COMMAND_ID = "models-presets.open";
+var MODELS_PRESETS_SLASH_NAME = "models-presets";
 var MINIMUM_OPENCODE_VERSION = "1.17.15";
 var tui = async (api, rawOptions) => {
   const options = normalizePluginOptions(rawOptions);
   api.keymap.registerLayer({
     commands: [
       {
-        name: MODEL_CONFIGURATOR_COMMAND_ID,
-        title: "Configure agent models",
-        desc: "Assign OpenCode models and variants by tier or agent",
-        category: "Agent Models",
+        name: MODELS_PRESETS_COMMAND_ID,
+        title: "Configure model presets",
+        desc: "Assign models and variants by agent or reuse a saved preset",
+        category: "Model Presets",
         namespace: "palette",
-        slashName: MODEL_CONFIGURATOR_SLASH_NAME,
+        slashName: MODELS_PRESETS_SLASH_NAME,
         run() {
           void resolveProfilesRoot(import.meta.url, options.profilesDir, api.state.path.directory).then((profilesRoot) => runModelConfigurator(api, profilesRoot)).catch((error) => {
             api.ui.toast({
               variant: "error",
-              title: "Model configurator failed",
+              title: "Model presets failed",
               message: String(error instanceof Error ? error.message : error),
               duration: 8e3
             });
@@ -3353,14 +3353,14 @@ var tui = async (api, rawOptions) => {
   });
 };
 var plugin = {
-  id: MODEL_CONFIGURATOR_PLUGIN_ID,
+  id: MODELS_PRESETS_PLUGIN_ID,
   tui
 };
 var tui_default = plugin;
 export {
   MINIMUM_OPENCODE_VERSION,
-  MODEL_CONFIGURATOR_COMMAND_ID,
-  MODEL_CONFIGURATOR_PLUGIN_ID,
-  MODEL_CONFIGURATOR_SLASH_NAME,
+  MODELS_PRESETS_COMMAND_ID,
+  MODELS_PRESETS_PLUGIN_ID,
+  MODELS_PRESETS_SLASH_NAME,
   tui_default as default
 };
