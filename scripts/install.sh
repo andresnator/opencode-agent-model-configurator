@@ -22,7 +22,7 @@ require_command() {
 
 resolve_latest_tag() {
   git ls-remote --refs --sort='-version:refname' --tags "$REPOSITORY_URL" 'v[0-9]*' |
-    awk 'NR == 1 { sub("refs/tags/", "", $2); print $2; exit }'
+    awk '$2 ~ /^refs\/tags\/v[0-9]+\.[0-9]+\.[0-9]+$/ { sub("refs/tags/", "", $2); print $2; exit }'
 }
 
 case "$REQUESTED_VERSION" in

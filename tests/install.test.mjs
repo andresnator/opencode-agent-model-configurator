@@ -18,7 +18,7 @@ async function shouldUseTmpAsTheDefaultInstallLocation() {
   assert.equal(defaultAssignment, '"/tmp/opencode-models-presets"')
 }
 
-async function shouldResolveLatestAndAllowExactReleaseWhenInstalling() {
+async function shouldResolveLatestStableReleaseAndAllowExactReleaseWhenInstalling() {
   const scratch = await mkdtemp(path.join(tmpdir(), "models-presets-installer."))
   try {
     // Given
@@ -84,6 +84,9 @@ async function createReleaseRepository(source, remote) {
     git(["commit", "--quiet", "-m", `release ${version}`], source)
     git(["tag", `v${version}`], source)
   }
+  // Higher non-stable tags must not displace the highest stable release.
+  git(["tag", "v0.3.0-rc.1"], source)
+  git(["tag", "v1"], source)
   execFileSync("git", ["clone", "--quiet", "--bare", source, remote])
 }
 
@@ -92,5 +95,5 @@ function git(arguments_, cwd) {
 }
 
 await shouldUseTmpAsTheDefaultInstallLocation()
-await shouldResolveLatestAndAllowExactReleaseWhenInstalling()
+await shouldResolveLatestStableReleaseAndAllowExactReleaseWhenInstalling()
 process.stdout.write("PASS: 2 installer contracts.\n")
