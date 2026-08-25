@@ -17,7 +17,7 @@ strictDepBuilds: true
 # esbuild's platform installer is required; optional native accelerators are
 # deliberately blocked because this repository does not need them.
 allowBuilds:
-  esbuild@0.28.1: true
+  esbuild@0.28.2: true
   msgpackr-extract@3.0.4: false
   fsevents@2.3.3: false
 packageManagerStrict: true
