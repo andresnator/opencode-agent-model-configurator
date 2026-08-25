@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/andresnator/opencode-agent-model-configurator/compare/v0.2.0...v0.2.1) (2026-08-25)
+
+
+### Dependencies
+
+* bump the non-major-dependencies group across 1 directory with 7 updates ([#12](https://github.com/andresnator/opencode-agent-model-configurator/issues/12)) ([bef4d97](https://github.com/andresnator/opencode-agent-model-configurator/commit/bef4d9796edd9f94c4ac56d0f172f81bbad1054d))
+
 ## [0.2.0](https://github.com/andresnator/opencode-agent-model-configurator/compare/v0.1.2...v0.2.0) (2026-08-07)
 
 
