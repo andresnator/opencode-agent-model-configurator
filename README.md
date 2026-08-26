@@ -29,8 +29,8 @@ Keep the checkout at that path, restart OpenCode, and use **Configure model pres
 1. Choose project or global scope.
 2. Start with live agents, an optional profile, or a saved preset.
 3. Keep, replace, or inherit assignments against the live model catalog.
-4. Review the complete change set before applying it.
-5. Follow the completion message: the current server may update live, or affected OpenCode sessions must restart.
+4. Review the complete change set, then create a named preset or select an existing preset to update. A saved preset is applied under its existing name.
+5. Confirm the active preset shown in the agent hub and follow the completion message: the current server may update live, or affected OpenCode sessions must restart.
 
 For scope destinations, assignment actions, profiles, presets, and environment precedence, use the canonical [configuration guide](docs/configuration.md#configure-agent-models-safely).
 
@@ -45,7 +45,7 @@ For scope destinations, assignment actions, profiles, presets, and environment p
 
 ## Safety and recovery
 
-The plugin shows the full change set before writing, preserves unrelated JSONC content, and protects assignment writes against concurrent edits and persistence failures. Read the [assignment write guarantees](docs/configuration.md#assignment-write-guarantees) for the canonical safety contract.
+The plugin shows the full change set before writing, requires a preset identity, preserves unrelated JSONC content, and protects assignment writes against concurrent edits and persistence failures. Read the [assignment write guarantees](docs/configuration.md#assignment-write-guarantees) for the canonical safety contract.
 
 For loading, command, catalog, profile, preset, write, reload, or deliberate-removal problems, [troubleshoot by symptom](docs/troubleshooting.md#troubleshoot-by-symptom).
 

@@ -1,4 +1,5 @@
 import type { TuiDialogSelectOption, TuiPluginApi } from "@opencode-ai/plugin/tui"
+import { activePresetFile, clearActivePreset, loadActivePreset, saveActivePreset } from "./active-preset"
 import {
   buildAgentHierarchy,
   calculateChanges,
@@ -44,14 +45,15 @@ const NEXT_AGENT = "__next_agent__"
 const PREV_AGENT = "__prev_agent__"
 const OVERRIDE_YES = "__override_yes__"
 const OVERRIDE_NO = "__override_no__"
-const APPLY = "__apply__"
-const APPLY_SAVE = "__apply_save__"
+const APPLY_NAMED_PRESET = "__apply_named_preset__"
+const CREATE_PRESET = "__create_preset__"
+const UPDATE_PRESET = "__update_preset__"
 const CANCEL = "__cancel__"
 const APPLY_PRESET = "__apply_preset__"
 const DELETE_PRESET = "__delete_preset__"
-const OVERWRITE_PRESET = "__overwrite_preset__"
-const RENAME_PRESET = "__rename_preset__"
+const ACTIVE_PRESET_INFO = "__active_preset_info__"
 const PRESET_PREFIX = "__preset__:"
+const UPDATE_PRESET_PREFIX = "__update_preset__:"
 const GROUP_PREFIX = "__group__:"
 const OTHER_GROUP = "__other_subagents__"
 const TOGGLE_HIDDEN = "__toggle_hidden__"
@@ -79,15 +81,21 @@ type WizardState = {
   presetStorageAvailable: boolean
   models: ModelOption[]
   presetsPath: string
+  activePresetPath?: string
+  activePresetName?: string
+  activePresetStatus: ActivePresetStatus
+  activePresetStorageAvailable: boolean
   showHidden: boolean
   scope?: ConfigScope
   configFile?: string
   snapshot?: ConfigSnapshot
-  source?: { kind: "profile" | "preset" | "agents" }
+  source?: { kind: "profile" | "agents" } | { kind: "preset"; name: string }
   selectedProfile?: ProfileFile
   tierDecisions?: Map<string, AgentDecision>
   decisions?: Map<string, AgentDecision>
 }
+
+type ActivePresetStatus = "none" | "synchronized" | "desynchronized" | "missing" | "unavailable"
 
 type WizardStep = {
   skip?: (state: WizardState) => boolean
@@ -138,7 +146,17 @@ export async function runModelConfigurator(api: TuiPluginApi, profilesRoot: stri
     }
     const models = flattenModels(catalog)
 
-    const state: WizardState = { agents, profiles, presets, presetStorageAvailable, models, presetsPath, showHidden: false }
+    const state: WizardState = {
+      agents,
+      profiles,
+      presets,
+      presetStorageAvailable,
+      models,
+      presetsPath,
+      activePresetStatus: "none",
+      activePresetStorageAvailable: true,
+      showHidden: false,
+    }
     await runSteps(api, state)
   } catch (error) {
     api.ui.toast({ variant: "error", title: "Model presets failed", message: errorMessage(error), duration: 8000 })
@@ -195,18 +213,32 @@ async function runScopeStep(api: TuiPluginApi, state: WizardState): Promise<Step
   state.scope = scope
   state.configFile = scope === "project" ? projectFile : globalFile
   state.snapshot = await readConfigSnapshot(state.configFile)
+  state.activePresetPath = activePresetFile(state.configFile)
+  state.activePresetStorageAvailable = true
+  try {
+    state.activePresetName = await loadActivePreset(state.activePresetPath)
+    state.activePresetStatus = evaluateActivePresetStatus(state)
+  } catch (error) {
+    state.activePresetName = undefined
+    state.activePresetStatus = "unavailable"
+    state.activePresetStorageAvailable = false
+    api.ui.toast({
+      variant: "warning",
+      message: `Active preset state unavailable at ${state.activePresetPath}: ${errorMessage(error)} Repair the file and reopen model presets.`,
+    })
+  }
   return "next"
 }
 
 async function runHubStep(api: TuiPluginApi, state: WizardState): Promise<StepOutcome> {
   while (true) {
     const pending = state.decisions?.size ?? 0
-    const options: TuiDialogSelectOption<string>[] = []
+    const options: TuiDialogSelectOption<string>[] = [activePresetInfoOption(state)]
     if (pending > 0) {
       options.push({
         title: `Review ${pending} pending change${pending === 1 ? "" : "s"}`,
         value: REVIEW_CHANGES,
-        description: "Continue to the apply confirmation",
+        description: "Continue to the named apply confirmation",
       })
     }
     const sections = hubSections(state)
@@ -236,12 +268,10 @@ async function runHubStep(api: TuiPluginApi, state: WizardState): Promise<StepOu
       })
     }
     for (const preset of state.presets) {
-      const count = Object.keys(preset.assignments).length
-      const saved = preset.savedAt ? ` — saved ${preset.savedAt.slice(0, 10)}` : ""
       options.push({
         title: preset.name,
         value: PRESET_PREFIX + preset.name,
-        description: `${count} agent${count === 1 ? "" : "s"}${saved}`,
+        description: presetDescription(preset),
         category: "Saved presets",
       })
     }
@@ -255,7 +285,7 @@ async function runHubStep(api: TuiPluginApi, state: WizardState): Promise<StepOu
     }
 
     if (selected === REVIEW_CHANGES) {
-      state.source = { kind: "agents" }
+      if (state.source?.kind !== "preset") state.source = { kind: "agents" }
       return "next"
     }
 
@@ -336,8 +366,7 @@ async function runGroupAgentsLoop(api: TuiPluginApi, state: WizardState, section
       const summary = agents.map((agent) => `${agent.name}: ${formatMapping(current[agent.name] ?? {})}`).join("; ")
       const decision = await selectDecision(api, `Configure every agent in ${section.title}`, state.models, undefined, summary)
       if (decision === undefined) continue
-      if (decision.action === "keep") for (const agent of agents) decisions.delete(agent.name)
-      else for (const agent of agents) decisions.set(agent.name, decision)
+      for (const agent of agents) updateHubDecision(state, decisions, agent.name, decision)
       continue
     }
 
@@ -349,9 +378,28 @@ async function runGroupAgentsLoop(api: TuiPluginApi, state: WizardState, section
       formatMapping(current[selected] ?? {}),
     )
     if (decision === undefined) continue
-    if (decision.action === "keep") decisions.delete(selected)
-    else decisions.set(selected, decision)
+    updateHubDecision(state, decisions, selected, decision)
   }
+}
+
+function updateHubDecision(
+  state: WizardState,
+  decisions: Map<string, AgentDecision>,
+  agent: string,
+  decision: AgentDecision,
+): void {
+  const previous = decisions.get(agent)
+  const next = decision.action === "keep" ? undefined : decision
+  if (next) decisions.set(agent, next)
+  else decisions.delete(agent)
+  if (state.source?.kind === "preset" && !agentDecisionsEqual(previous, next)) state.source = { kind: "agents" }
+}
+
+function agentDecisionsEqual(left: AgentDecision | undefined, right: AgentDecision | undefined): boolean {
+  if (!left || !right) return left === right
+  if (left.action !== right.action) return false
+  if (left.action !== "set" || right.action !== "set") return true
+  return left.model === right.model && left.variant === right.variant
 }
 
 async function handlePresetChoice(api: TuiPluginApi, state: WizardState, preset: StoredPreset): Promise<StepOutcome | "reshow"> {
@@ -377,6 +425,23 @@ async function handlePresetChoice(api: TuiPluginApi, state: WizardState, preset:
       return "reshow"
     }
     state.presets = state.presets.filter((entry) => entry.name !== preset.name)
+    if (state.activePresetName === preset.name && state.activePresetPath) {
+      try {
+        await clearActivePreset(state.activePresetPath)
+        state.activePresetName = undefined
+        state.activePresetStatus = "none"
+      } catch (error) {
+        state.activePresetStorageAvailable = false
+        state.activePresetStatus = "unavailable"
+        api.ui.toast({
+          variant: "error",
+          title: "Preset deleted; active state not cleared",
+          message: errorMessage(error),
+          duration: 8000,
+        })
+        return "reshow"
+      }
+    }
     api.ui.toast({ variant: "success", message: `Deleted preset "${preset.name}".` })
     return "reshow"
   }
@@ -401,7 +466,7 @@ async function handlePresetChoice(api: TuiPluginApi, state: WizardState, preset:
   }
   state.decisions = decisions
   state.tierDecisions = new Map()
-  state.source = { kind: "preset" }
+  state.source = { kind: "preset", name: preset.name }
   return "next"
 }
 
@@ -526,8 +591,7 @@ async function runReviewStep(api: TuiPluginApi, state: WizardState): Promise<Ste
   const decisions = state.decisions!
   const changes = calculateChanges(snapshot.mappings, decisions)
   if (changes.length === 0) {
-    api.ui.toast({ variant: "info", message: "No model assignment changes selected." })
-    return "back"
+    return activateMatchingPresetWithoutChanges(api, state)
   }
 
   const warning = higherPrecedenceWarning()
@@ -537,18 +601,41 @@ async function runReviewStep(api: TuiPluginApi, state: WizardState): Promise<Ste
       (categoryOf.get(left.agent) ?? "other").localeCompare(categoryOf.get(right.agent) ?? "other") ||
       left.agent.localeCompare(right.agent),
   )
-  const title = `Apply ${changes.length} model change${changes.length === 1 ? "" : "s"}?`
+  const sourcePresetName = state.source?.kind === "preset" ? state.source.name : undefined
+  const namedStorageAvailable = state.presetStorageAvailable && state.activePresetStorageAvailable
+  const unavailable = namedWriteUnavailableDescription(state)
+  const title = sourcePresetName
+    ? `Apply ${changes.length} model change${changes.length === 1 ? "" : "s"} from preset "${sourcePresetName}"?`
+    : `Apply ${changes.length} model change${changes.length === 1 ? "" : "s"} with a preset?`
+  const actions: TuiDialogSelectOption<string>[] = sourcePresetName
+    ? [
+        {
+          title: `Apply preset "${sourcePresetName}"`,
+          value: APPLY_NAMED_PRESET,
+          description: state.activePresetStorageAvailable ? warning || undefined : unavailable,
+          disabled: !state.activePresetStorageAvailable,
+        },
+      ]
+    : [
+        {
+          title: "Create new preset",
+          value: CREATE_PRESET,
+          description: namedStorageAvailable ? warning || undefined : unavailable,
+          disabled: !namedStorageAvailable,
+        },
+        {
+          title: "Update existing preset",
+          value: UPDATE_PRESET,
+          description:
+            state.presets.length === 0 && namedStorageAvailable ? "No saved presets are available." : namedStorageAvailable ? warning || undefined : unavailable,
+          disabled: !namedStorageAvailable || state.presets.length === 0,
+        },
+      ]
   const choice = await select(
     api,
     title,
     [
-      { title: "Apply", value: APPLY, description: warning || undefined },
-      {
-        title: "Apply and save as preset",
-        value: APPLY_SAVE,
-        description: state.presetStorageAvailable ? undefined : "Repair preset storage and reopen model presets to enable saving.",
-        disabled: !state.presetStorageAvailable,
-      },
+      ...actions,
       { title: "Cancel", value: CANCEL },
       ...rows.map((change) => ({
         title: change.agent,
@@ -562,14 +649,26 @@ async function runReviewStep(api: TuiPluginApi, state: WizardState): Promise<Ste
   )
   if (!choice) return "back"
   if (choice === CANCEL) return "done"
-  if (choice !== APPLY && choice !== APPLY_SAVE) return "back"
-  if (choice === APPLY_SAVE && !state.presetStorageAvailable) return "back"
+  if (sourcePresetName && choice !== APPLY_NAMED_PRESET) return "back"
+  if (!sourcePresetName && choice !== CREATE_PRESET && choice !== UPDATE_PRESET) return "back"
+  if (sourcePresetName && !state.activePresetStorageAvailable) return "back"
+  if (!sourcePresetName && !namedStorageAvailable) return "back"
+  if (choice === UPDATE_PRESET && state.presets.length === 0) return "back"
 
-  let presetName: string | undefined
-  if (choice === APPLY_SAVE) {
-    presetName = await promptPresetName(api, state)
+  let presetName = sourcePresetName
+  let presetMutated = false
+  if (!sourcePresetName && choice === CREATE_PRESET) {
+    presetName = await promptNewPresetName(api, state)
     if (presetName === undefined) return "back"
+    presetMutated = true
+  } else if (!sourcePresetName && choice === UPDATE_PRESET) {
+    presetName = await selectPresetToUpdate(api, state)
+    if (presetName === undefined) return "back"
+    presetMutated = true
   }
+  if (!presetName) return "back"
+
+  if (sourcePresetName && !(await refreshSelectedPreset(api, state, sourcePresetName))) return "exit"
 
   const refreshedModels = flattenModels(await loadCatalog(api))
   const stale = findStaleSelections(decisions, refreshedModels)
@@ -578,30 +677,109 @@ async function runReviewStep(api: TuiPluginApi, state: WizardState): Promise<Ste
     return "exit"
   }
 
-  const result = await applyConfigChanges(api.client, state.scope!, api.state.path, snapshot, changes)
+  const assignments = resolvePresetAssignments(snapshot.mappings, changes, state.agents.map((agent) => agent.name))
+  if (presetMutated) {
+    const storedPreset = { name: presetName, savedAt: new Date().toISOString(), assignments }
+    try {
+      await savePreset(state.presetsPath, storedPreset)
+      state.presets = [...state.presets.filter((entry) => entry.name !== presetName), storedPreset].sort((left, right) =>
+        left.name.localeCompare(right.name),
+      )
+    } catch (error) {
+      state.presets = []
+      state.presetStorageAvailable = false
+      api.ui.toast({
+        variant: "error",
+        title: "Preset not saved",
+        message: `${errorMessage(error)} Configuration was not applied.`,
+        duration: 8000,
+      })
+      return "done"
+    }
+  }
+
+  try {
+    await saveActivePreset(state.activePresetPath!, presetName)
+    state.activePresetName = presetName
+  } catch (error) {
+    state.activePresetStorageAvailable = false
+    state.activePresetStatus = "unavailable"
+    api.ui.toast({
+      variant: "error",
+      title: "Active preset not saved",
+      message: `${presetMutated ? `Preset "${presetName}" was saved, but ` : ""}${errorMessage(error)} Configuration was not applied.`,
+      duration: 8000,
+    })
+    return "done"
+  }
+
+  let result
+  try {
+    result = await applyConfigChanges(api.client, state.scope!, api.state.path, snapshot, changes)
+  } catch (error) {
+    state.activePresetStatus = "desynchronized"
+    api.ui.toast({
+      variant: "error",
+      title: "Configuration not applied",
+      message: presetMutated
+        ? `Preset "${presetName}" was saved, but ${errorMessage(error)}`
+        : `Preset "${presetName}" was marked active, but ${errorMessage(error)}`,
+      duration: 8000,
+    })
+    return "done"
+  }
+  const appliedPreset = state.presets.find((entry) => entry.name === presetName)
+  state.activePresetStatus =
+    appliedPreset && presetMatchesAssignments(appliedPreset, assignments, state) ? "synchronized" : "desynchronized"
   api.ui.toast({
     variant: "success",
     title: "Agent models updated",
     message: result.hotApplied
-      ? `Wrote ${result.file}. Applied live to this OpenCode server; other running OpenCode processes still need a restart.`
-      : `Wrote ${result.file}. Restart OpenCode sessions to apply the assignments (${result.detail}).`,
+      ? `Preset "${presetName}" is active. Wrote ${result.file}. Applied live to this OpenCode server; other running OpenCode processes still need a restart.`
+      : `Preset "${presetName}" is active. Wrote ${result.file}. Restart OpenCode sessions to apply the assignments (${result.detail}).`,
     duration: 8000,
   })
-
-  if (presetName !== undefined) {
-    try {
-      const assignments = resolvePresetAssignments(snapshot.mappings, changes, state.agents.map((agent) => agent.name))
-      await savePreset(state.presetsPath, { name: presetName, savedAt: new Date().toISOString(), assignments })
-      api.ui.toast({ variant: "success", message: `Saved preset "${presetName}".` })
-    } catch (error) {
-      state.presetStorageAvailable = false
-      api.ui.toast({ variant: "error", title: "Preset not saved", message: errorMessage(error), duration: 8000 })
-    }
-  }
   return "done"
 }
 
-async function promptPresetName(api: TuiPluginApi, state: WizardState): Promise<string | undefined> {
+async function activateMatchingPresetWithoutChanges(api: TuiPluginApi, state: WizardState): Promise<StepOutcome> {
+  if (state.source?.kind !== "preset") {
+    api.ui.toast({ variant: "info", message: "No model assignment changes selected." })
+    return "back"
+  }
+  const sourcePresetName = state.source.name
+  const preset = await refreshSelectedPreset(api, state, sourcePresetName)
+  if (!preset) return "exit"
+  const [snapshot, catalog] = await Promise.all([readConfigSnapshot(state.configFile!), loadCatalog(api)])
+  state.snapshot = snapshot
+  state.models = flattenModels(catalog)
+  state.activePresetStatus = evaluateActivePresetStatus(state)
+  if (!presetMatchesCurrent(preset, state)) {
+    api.ui.toast({
+      variant: "info",
+      message: `Preset "${sourcePresetName}" has no model changes to apply but does not fully match the current configuration.`,
+    })
+    return "back"
+  }
+  if (!state.activePresetStorageAvailable) {
+    api.ui.toast({ variant: "error", title: "Active preset not saved", message: namedWriteUnavailableDescription(state) })
+    return "done"
+  }
+  try {
+    await saveActivePreset(state.activePresetPath!, preset.name)
+  } catch (error) {
+    state.activePresetStorageAvailable = false
+    state.activePresetStatus = "unavailable"
+    api.ui.toast({ variant: "error", title: "Active preset not saved", message: errorMessage(error), duration: 8000 })
+    return "done"
+  }
+  state.activePresetName = preset.name
+  state.activePresetStatus = "synchronized"
+  api.ui.toast({ variant: "success", title: "Preset active", message: `Preset "${preset.name}" already matches this configuration.` })
+  return "done"
+}
+
+async function promptNewPresetName(api: TuiPluginApi, state: WizardState): Promise<string | undefined> {
   while (true) {
     const name = await prompt(api, "Preset name", "Name this preset")
     if (name === undefined) return undefined
@@ -611,19 +789,61 @@ async function promptPresetName(api: TuiPluginApi, state: WizardState): Promise<
       continue
     }
     if (state.presets.some((entry) => entry.name === trimmed)) {
-      const choice = await select(
-        api,
-        `Overwrite preset "${trimmed}"?`,
-        [
-          { title: "Overwrite", value: OVERWRITE_PRESET, description: "Replace the saved preset" },
-          { title: "Choose another name", value: RENAME_PRESET },
-        ],
-        BACK_HINT,
-      )
-      if (choice !== OVERWRITE_PRESET) continue
+      api.ui.toast({ variant: "warning", message: `Preset "${trimmed}" already exists. Use Update existing preset.` })
+      continue
     }
     return trimmed
   }
+}
+
+async function selectPresetToUpdate(api: TuiPluginApi, state: WizardState): Promise<string | undefined> {
+  const current = state.presets.some((preset) => preset.name === state.activePresetName)
+    ? UPDATE_PRESET_PREFIX + state.activePresetName
+    : undefined
+  const selected = await select(
+    api,
+    "Select preset to update",
+    state.presets.map((preset) => ({
+      title: preset.name,
+      value: UPDATE_PRESET_PREFIX + preset.name,
+      description: presetDescription(preset),
+    })),
+    BACK_HINT,
+    current,
+  )
+  return selected?.startsWith(UPDATE_PRESET_PREFIX) ? selected.slice(UPDATE_PRESET_PREFIX.length) : undefined
+}
+
+async function refreshSelectedPreset(
+  api: TuiPluginApi,
+  state: WizardState,
+  name: string,
+): Promise<StoredPreset | undefined> {
+  let latest: StoredPreset[]
+  try {
+    latest = await loadPresets(state.presetsPath)
+  } catch (error) {
+    state.presets = []
+    state.presetStorageAvailable = false
+    api.ui.toast({
+      variant: "error",
+      title: "Preset unavailable",
+      message: `${errorMessage(error)} Configuration was not applied.`,
+      duration: 8000,
+    })
+    return undefined
+  }
+  const selected = state.presets.find((preset) => preset.name === name)
+  const refreshed = latest.find((preset) => preset.name === name)
+  if (!selected || !refreshed || !assignmentRecordsEqual(selected.assignments, refreshed.assignments)) {
+    api.ui.toast({
+      variant: "warning",
+      message: `Preset "${name}" changed while the configurator was open. Reopen and select it again.`,
+    })
+    return undefined
+  }
+  state.presets = latest
+  return refreshed
 }
 
 function resolvePresetAssignments(
@@ -640,6 +860,78 @@ function resolvePresetAssignments(
     assignments[agent] = mapping.variant ? { model: mapping.model, variant: mapping.variant } : { model: mapping.model }
   }
   return assignments
+}
+
+function evaluateActivePresetStatus(state: WizardState): ActivePresetStatus {
+  if (!state.presetStorageAvailable || !state.activePresetStorageAvailable) return "unavailable"
+  if (!state.activePresetName) return "none"
+  const preset = state.presets.find((entry) => entry.name === state.activePresetName)
+  if (!preset) return "missing"
+  return presetMatchesCurrent(preset, state) ? "synchronized" : "desynchronized"
+}
+
+function presetMatchesCurrent(preset: StoredPreset, state: WizardState): boolean {
+  const assignments = resolvePresetAssignments(state.snapshot!.mappings, [], state.agents.map((agent) => agent.name))
+  return presetMatchesAssignments(preset, assignments, state)
+}
+
+function presetMatchesAssignments(
+  preset: StoredPreset,
+  assignments: Readonly<Record<string, PresetAssignment>>,
+  state: WizardState,
+): boolean {
+  const { valid, stale } = partitionPresetAssignments(
+    preset.assignments,
+    state.agents.map((agent) => agent.name),
+    state.models,
+  )
+  if (stale.length > 0) return false
+  return assignmentRecordsEqual(valid, assignments)
+}
+
+function assignmentRecordsEqual(
+  left: Readonly<Record<string, PresetAssignment>>,
+  right: Readonly<Record<string, PresetAssignment>>,
+): boolean {
+  const leftAgents = Object.keys(left).sort()
+  const rightAgents = Object.keys(right).sort()
+  if (leftAgents.length !== rightAgents.length) return false
+  return leftAgents.every((agent, index) => {
+    if (agent !== rightAgents[index]) return false
+    return left[agent].model === right[agent].model && left[agent].variant === right[agent].variant
+  })
+}
+
+function activePresetInfoOption(state: WizardState): TuiDialogSelectOption<string> {
+  const name = state.activePresetName ?? "none"
+  const descriptions: Record<ActivePresetStatus, string> = {
+    none: "Changes must be saved under a preset before they can be applied",
+    synchronized: `Matches the current ${state.scope} assignments`,
+    desynchronized: `Does not match the current ${state.scope} assignments`,
+    missing: "The referenced preset no longer exists",
+    unavailable: "Preset identity is unavailable; repair its storage and reopen model presets",
+  }
+  return {
+    title: `Active preset: ${name}`,
+    value: ACTIVE_PRESET_INFO,
+    description: descriptions[state.activePresetStatus],
+    category: "Configuration",
+    disabled: true,
+  }
+}
+
+function presetDescription(preset: StoredPreset): string {
+  const count = Object.keys(preset.assignments).length
+  const saved = preset.savedAt ? ` — saved ${preset.savedAt.slice(0, 10)}` : ""
+  return `${count} agent${count === 1 ? "" : "s"}${saved}`
+}
+
+function namedWriteUnavailableDescription(state: WizardState): string {
+  if (!state.presetStorageAvailable) return "Repair preset storage and reopen model presets to enable named applies."
+  if (!state.activePresetStorageAvailable) {
+    return "Repair active preset state and reopen model presets to enable named applies."
+  }
+  return "Named apply is unavailable."
 }
 
 async function selectDecision(

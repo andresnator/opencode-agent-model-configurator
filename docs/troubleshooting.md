@@ -7,6 +7,7 @@ Start with the message or missing behavior you can see. Normal scope, file, prof
 | Plugin or entry point is missing | Verify the registered local path, then restart OpenCode |
 | Agent, provider, model, or variant is missing | Refresh the relevant live OpenCode catalog |
 | Profile or preset is unavailable | Read the warning before changing or deleting stored data |
+| Active preset is missing or desynchronized | Compare the current scope with the named preset before updating or reapplying it |
 | File changed or cannot be written | Preserve the current file and reopen after fixing the cause |
 | Write succeeded but values are inactive | Check environment precedence, then restart affected sessions |
 
@@ -43,12 +44,22 @@ A missing profile directory is not a plugin-load failure. Continue by configurin
 
 ## A preset cannot be loaded or applied
 
-- **Preset storage is malformed, unreadable, or has an invalid shape:** Models Presets preserves the legacy-compatible `model-configurator-presets.json` filename, disables preset operations, and keeps core agent configuration usable. Back up and repair the file, then reopen the plugin.
+- **Preset storage is malformed, unreadable, or has an invalid shape:** Models Presets preserves the legacy-compatible `model-configurator-presets.json` filename and disables every named apply action. Back up and repair the file, then reopen the plugin; the configuration is not written without a saved preset.
 - **Some assignments are stale:** review the listed agents. Apply the valid remainder if it is still useful, then reselect live assignments and overwrite the preset when ready.
 - **Every assignment is stale:** nothing is applied. Recreate the preset from live agents, models, and variants.
 - **A final selection became stale:** reopen and reselect; the stopped flow did not write those pending changes.
 
 Do not delete malformed storage merely to dismiss the warning. Delete it only as the deliberate reset described in [Remove or reset the plugin deliberately](#remove-or-reset-the-plugin-deliberately). Preset storage and validation are defined in [Save presets and revalidate live data](configuration.md#save-presets-and-revalidate-live-data).
+
+## The active preset is missing or desynchronized
+
+The agent hub reads `models-presets-active.json` for the selected scope and compares that name with the saved preset and current live assignments.
+
+- **Desynchronized:** the configuration, live catalog, or saved preset changed after the name was recorded. Review the values, then reapply the saved preset or update it from the current configuration.
+- **Preset no longer exists:** the global preset was deleted while this scope still referenced it. Select or create a replacement during the next configuration change.
+- **Active state is malformed or unreadable:** named apply actions remain disabled. Back up and repair or deliberately remove only the reported sidecar, then reopen Models Presets.
+
+Deleting the active preset from the open scope also removes that scope's sidecar but intentionally leaves its current model assignments unchanged. References in other projects are not searched or changed; those projects report the missing preset when opened.
 
 ## Environment values appear instead of file changes
 
@@ -68,7 +79,7 @@ Preserve the newer content, close the failed flow, reopen Models Presets to load
 
 ## The configuration cannot be written
 
-Assignment writes are atomic. If persistence fails after writing starts, recovery restores the previous content or removes a destination created by the failed attempt; Models Presets does not report partial success.
+Assignment writes are atomic. If configuration persistence fails after writing starts, recovery restores the previous content or removes a destination created by the failed attempt. Because the preset and active sidecar are prerequisites, they may already be saved; the error reports this explicitly and the hub shows the active name as desynchronized.
 
 1. Note the exact destination and error shown by Models Presets.
 2. Inspect the destination before editing it, and preserve any content that exists.
@@ -96,6 +107,7 @@ Then choose each cleanup action independently:
 
 - Delete the retained checkout only when no registration points to it.
 - Delete `model-configurator-presets.json` only if all saved presets should be discarded.
+- Delete a scope's `models-presets-active.json` only if its preset association should be discarded without changing current model assignments.
 - In project or global OpenCode configuration, remove only agent `model` and `variant` assignments you know were created through Models Presets. The files do not record assignment provenance, so preserve uncertain and unrelated settings.
 - Keep or delete user-authored profile files according to your own reuse needs; the plugin never owns them.
 
