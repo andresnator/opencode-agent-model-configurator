@@ -47,6 +47,7 @@ A missing profile directory is not a plugin-load failure. Continue by configurin
 - **Some assignments are stale:** review the listed agents. Apply the valid remainder if it is still useful, then reselect live assignments and overwrite the preset when ready.
 - **Every assignment is stale:** nothing is applied. Recreate the preset from live agents, models, and variants.
 - **A final selection became stale:** reopen and reselect; the stopped flow did not write those pending changes.
+- **The selected preset changed before update:** another configurator updated or deleted it. Reopen the preset list and review the latest storage before retrying; the concurrent version was preserved.
 
 Do not delete malformed storage merely to dismiss the warning. Delete it only as the deliberate reset described in [Remove or reset the plugin deliberately](#remove-or-reset-the-plugin-deliberately). Preset storage and validation are defined in [Save presets and revalidate live data](configuration.md#save-presets-and-revalidate-live-data).
 

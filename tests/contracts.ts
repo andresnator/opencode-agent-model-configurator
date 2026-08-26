@@ -3066,6 +3066,75 @@ async function shouldUpdatePresetBySelectingExistingName(): Promise<void> {
   }
 }
 
+async function shouldRejectUpdateWhenSelectedPresetChangesConcurrently(): Promise<void> {
+  const scenarios: Array<{ name: string; presets: Array<Record<string, unknown>> }> = [
+    {
+      name: "updated",
+      presets: [
+        {
+          name: "saved",
+          savedAt: "2026-01-02T00:00:00.000Z",
+          assignments: { alpha: { model: "anthropic/old" } },
+        },
+      ],
+    },
+    { name: "deleted", presets: [] },
+  ]
+
+  for (const scenario of scenarios) {
+    const scratch = await createWizardFixture()
+    try {
+      // Given an update selection whose saved preset changes in another configurator
+      const configFile = path.join(scratch.project, ".opencode", "opencode.jsonc")
+      const originalConfig = await readFile(configFile, "utf8")
+      const presetsPath = path.join(scratch.global, "model-configurator-presets.json")
+      await savePreset(presetsPath, {
+        name: "saved",
+        savedAt: "2026-01-01T00:00:00.000Z",
+        assignments: { alpha: { model: "openai/new", variant: "high" } },
+      })
+      const concurrentBytes = `${JSON.stringify({ version: 1, presets: scenario.presets })}\n`
+      const toasts: TuiToast[] = []
+      const api = createFakeApi(scratch, toasts, {
+        select(title, options) {
+          if (title === "Configuration scope") return option(options, "project")
+          if (title === "Agents") return option(options, "default")
+          if (title === "Tier: high") return option(options, "openai/new")
+          if (title === "Variant for openai/new") return option(options, "high")
+          if (title === "Tier: low") return option(options, "__keep_current__")
+          if (title === "Individual overrides") return option(options, "__override_no__")
+          if (title.startsWith("Apply ")) return option(options, "__update_preset__")
+          if (title === "Select preset to update") {
+            writeFileSync(presetsPath, concurrentBytes)
+            return option(options, "__update_preset__:saved")
+          }
+          throw new Error(`unexpected select dialog: ${title}`)
+        },
+        confirm() {
+          return true
+        },
+      })
+
+      // When the wizard revalidates the selected record immediately before replacement
+      await runModelConfigurator(api, scratch.profiles)
+
+      // Then it preserves the concurrent storage and leaves the configuration untouched
+      assert.equal(await readFile(presetsPath, "utf8"), concurrentBytes, scenario.name)
+      assert.equal(await readFile(configFile, "utf8"), originalConfig, scenario.name)
+      assert.ok(
+        toasts.some(
+          (toast) => toast.variant === "warning" && toast.message?.includes('Preset "saved" changed while the configurator was open'),
+        ),
+        scenario.name,
+      )
+      assert.equal(toasts.some((toast) => toast.variant === "error"), false, scenario.name)
+    } finally {
+      await rm(scratch.root, { recursive: true, force: true })
+    }
+  }
+  pass("shouldRejectUpdateWhenSelectedPresetChangesConcurrently")
+}
+
 async function shouldToastAndRepromptWhenPresetNameIsEmpty(): Promise<void> {
   const scratch = await createWizardFixture()
   try {
@@ -4722,6 +4791,7 @@ await shouldUseLatestValidStorageForMutationsAndSupportFirstSave()
 await shouldWriteExactV1BytesAndCleanTemporaryFilesAfterAtomicMutations()
 await shouldPreserveUnownedTemporaryFileWhenExclusiveOpenCollides()
 await shouldUpdatePresetBySelectingExistingName()
+await shouldRejectUpdateWhenSelectedPresetChangesConcurrently()
 await shouldToastAndRepromptWhenPresetNameIsEmpty()
 await shouldGroupReviewChangesByParentAgent()
 await shouldRevealInternalAgentsWhenHubTogglesThem()

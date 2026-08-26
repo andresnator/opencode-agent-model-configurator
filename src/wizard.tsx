@@ -26,6 +26,7 @@ import {
 } from "./persistence"
 import {
   deletePreset,
+  isPresetConflictError,
   loadPresets,
   partitionPresetAssignments,
   presetsFile,
@@ -616,13 +617,15 @@ async function runReviewStep(api: TuiPluginApi, state: WizardState): Promise<Ste
 
   let presetName = sourcePresetName
   let presetMutated = false
+  let presetToUpdate: StoredPreset | undefined
   if (!sourcePresetName && choice === CREATE_PRESET) {
     presetName = await promptNewPresetName(api, state)
     if (presetName === undefined) return "back"
     presetMutated = true
   } else if (!sourcePresetName && choice === UPDATE_PRESET) {
-    presetName = await selectPresetToUpdate(api, state)
-    if (presetName === undefined) return "back"
+    presetToUpdate = await selectPresetToUpdate(api, state)
+    if (!presetToUpdate) return "back"
+    presetName = presetToUpdate.name
     presetMutated = true
   }
   if (!presetName) return "back"
@@ -640,11 +643,15 @@ async function runReviewStep(api: TuiPluginApi, state: WizardState): Promise<Ste
   if (presetMutated) {
     const storedPreset = { name: presetName, savedAt: new Date().toISOString(), assignments }
     try {
-      await savePreset(state.presetsPath, storedPreset)
+      await savePreset(state.presetsPath, storedPreset, { expected: presetToUpdate })
       state.presets = [...state.presets.filter((entry) => entry.name !== presetName), storedPreset].sort((left, right) =>
         left.name.localeCompare(right.name),
       )
     } catch (error) {
+      if (isPresetConflictError(error)) {
+        api.ui.toast({ variant: "warning", message: errorMessage(error) })
+        return "done"
+      }
       state.presets = []
       state.presetStorageAvailable = false
       api.ui.toast({
@@ -707,7 +714,7 @@ async function promptNewPresetName(api: TuiPluginApi, state: WizardState): Promi
   }
 }
 
-async function selectPresetToUpdate(api: TuiPluginApi, state: WizardState): Promise<string | undefined> {
+async function selectPresetToUpdate(api: TuiPluginApi, state: WizardState): Promise<StoredPreset | undefined> {
   const selected = await select(
     api,
     "Select preset to update",
@@ -718,7 +725,9 @@ async function selectPresetToUpdate(api: TuiPluginApi, state: WizardState): Prom
     })),
     BACK_HINT,
   )
-  return selected?.startsWith(UPDATE_PRESET_PREFIX) ? selected.slice(UPDATE_PRESET_PREFIX.length) : undefined
+  if (!selected?.startsWith(UPDATE_PRESET_PREFIX)) return undefined
+  const name = selected.slice(UPDATE_PRESET_PREFIX.length)
+  return state.presets.find((preset) => preset.name === name)
 }
 
 async function refreshSelectedPreset(

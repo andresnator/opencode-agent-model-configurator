@@ -53,6 +53,8 @@ Every assignment write has a preset identity. After configuring agents or using 
 - **Create new preset** prompts for a new, non-empty name. An existing name must be chosen through the update flow.
 - **Update existing preset** opens the saved preset list and replaces the selected entry without asking you to type its name again.
 
+Immediately before replacing a selected preset, the plugin reloads the global store and verifies that the selected record still exists unchanged. If another configurator updated or deleted it, the write stops and the newer storage is preserved.
+
 Starting from a saved preset instead shows **Apply preset "name"**. The normal configuration write still runs when that preset already matches every live concrete assignment; the plugin does not persist or infer an active preset.
 
 Before applying a preset, the plugin checks its assignments against the live agents, connected providers, models, and variants. It identifies stale entries and skips them before applying any valid remainder. It does not silently delete the saved preset.

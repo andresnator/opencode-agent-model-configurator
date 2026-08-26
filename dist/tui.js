@@ -2473,6 +2473,8 @@ var PRESET_KEYS = ["name", "savedAt", "assignments"];
 var ASSIGNMENT_KEYS = ["model", "variant"];
 var FORBIDDEN_KEYS = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
 var FATAL_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+var PresetConflictError = class extends Error {
+};
 function presetsFile(runtime) {
   return path3.join(globalConfigRoot(runtime), PRESETS_FILE);
 }
@@ -2498,12 +2500,22 @@ async function loadPresets(file) {
   }
   return validatePresetDocument(parsed, file);
 }
-async function savePreset(file, preset) {
+async function savePreset(file, preset, options = {}) {
   const existing = await loadPresets(file);
+  const expected = options.expected;
+  if (expected) {
+    const current = existing.find((entry) => entry.name === expected.name);
+    if (!storedPresetsEqual(current, expected)) {
+      throw new PresetConflictError(`Preset "${expected.name}" changed while the configurator was open. Reopen and select it again.`);
+    }
+  }
   const next = existing.filter((entry) => entry.name !== preset.name);
   next.push(preset);
   next.sort((left, right) => left.name.localeCompare(right.name));
   await writePresets(file, next);
+}
+function isPresetConflictError(error) {
+  return error instanceof PresetConflictError;
 }
 async function deletePreset(file, name) {
   const existing = await loadPresets(file);
@@ -2573,6 +2585,16 @@ function validatePresetDocument(raw, file) {
     presets.push(preset);
   }
   return presets.sort((left, right) => left.name.localeCompare(right.name));
+}
+function storedPresetsEqual(left, right) {
+  if (!left || left.name !== right.name || left.savedAt !== right.savedAt) return false;
+  const leftAgents = Object.keys(left.assignments).sort();
+  const rightAgents = Object.keys(right.assignments).sort();
+  if (leftAgents.length !== rightAgents.length) return false;
+  return leftAgents.every((agent, index) => {
+    if (agent !== rightAgents[index]) return false;
+    return left.assignments[agent].model === right.assignments[agent].model && left.assignments[agent].variant === right.assignments[agent].variant;
+  });
 }
 async function syncDirectory2(directory) {
   const handle = await open2(directory, "r");
@@ -3149,13 +3171,15 @@ async function runReviewStep(api, state) {
   if (choice === UPDATE_PRESET && state.presets.length === 0) return "back";
   let presetName = sourcePresetName;
   let presetMutated = false;
+  let presetToUpdate;
   if (!sourcePresetName && choice === CREATE_PRESET) {
     presetName = await promptNewPresetName(api, state);
     if (presetName === void 0) return "back";
     presetMutated = true;
   } else if (!sourcePresetName && choice === UPDATE_PRESET) {
-    presetName = await selectPresetToUpdate(api, state);
-    if (presetName === void 0) return "back";
+    presetToUpdate = await selectPresetToUpdate(api, state);
+    if (!presetToUpdate) return "back";
+    presetName = presetToUpdate.name;
     presetMutated = true;
   }
   if (!presetName) return "back";
@@ -3170,11 +3194,15 @@ async function runReviewStep(api, state) {
   if (presetMutated) {
     const storedPreset = { name: presetName, savedAt: (/* @__PURE__ */ new Date()).toISOString(), assignments };
     try {
-      await savePreset(state.presetsPath, storedPreset);
+      await savePreset(state.presetsPath, storedPreset, { expected: presetToUpdate });
       state.presets = [...state.presets.filter((entry) => entry.name !== presetName), storedPreset].sort(
         (left, right) => left.name.localeCompare(right.name)
       );
     } catch (error) {
+      if (isPresetConflictError(error)) {
+        api.ui.toast({ variant: "warning", message: errorMessage(error) });
+        return "done";
+      }
       state.presets = [];
       state.presetStorageAvailable = false;
       api.ui.toast({
@@ -3241,7 +3269,9 @@ async function selectPresetToUpdate(api, state) {
     })),
     BACK_HINT
   );
-  return selected?.startsWith(UPDATE_PRESET_PREFIX) ? selected.slice(UPDATE_PRESET_PREFIX.length) : void 0;
+  if (!selected?.startsWith(UPDATE_PRESET_PREFIX)) return void 0;
+  const name = selected.slice(UPDATE_PRESET_PREFIX.length);
+  return state.presets.find((preset) => preset.name === name);
 }
 async function refreshSelectedPreset(api, state, name) {
   let latest;

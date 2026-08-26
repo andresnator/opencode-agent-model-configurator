@@ -31,6 +31,12 @@ export type PartitionedAssignments = {
   stale: string[]
 }
 
+export type SavePresetOptions = {
+  expected?: StoredPreset
+}
+
+class PresetConflictError extends Error {}
+
 export function presetsFile(runtime: RuntimePaths): string {
   return path.join(globalConfigRoot(runtime), PRESETS_FILE)
 }
@@ -59,12 +65,23 @@ export async function loadPresets(file: string): Promise<StoredPreset[]> {
   return validatePresetDocument(parsed, file)
 }
 
-export async function savePreset(file: string, preset: StoredPreset): Promise<void> {
+export async function savePreset(file: string, preset: StoredPreset, options: SavePresetOptions = {}): Promise<void> {
   const existing = await loadPresets(file)
+  const expected = options.expected
+  if (expected) {
+    const current = existing.find((entry) => entry.name === expected.name)
+    if (!storedPresetsEqual(current, expected)) {
+      throw new PresetConflictError(`Preset "${expected.name}" changed while the configurator was open. Reopen and select it again.`)
+    }
+  }
   const next = existing.filter((entry) => entry.name !== preset.name)
   next.push(preset)
   next.sort((left, right) => left.name.localeCompare(right.name))
   await writePresets(file, next)
+}
+
+export function isPresetConflictError(error: unknown): boolean {
+  return error instanceof PresetConflictError
 }
 
 export async function deletePreset(file: string, name: string): Promise<void> {
@@ -143,6 +160,20 @@ function validatePresetDocument(raw: unknown, file: string): StoredPreset[] {
     presets.push(preset)
   }
   return presets.sort((left, right) => left.name.localeCompare(right.name))
+}
+
+function storedPresetsEqual(left: StoredPreset | undefined, right: StoredPreset): boolean {
+  if (!left || left.name !== right.name || left.savedAt !== right.savedAt) return false
+  const leftAgents = Object.keys(left.assignments).sort()
+  const rightAgents = Object.keys(right.assignments).sort()
+  if (leftAgents.length !== rightAgents.length) return false
+  return leftAgents.every((agent, index) => {
+    if (agent !== rightAgents[index]) return false
+    return (
+      left.assignments[agent].model === right.assignments[agent].model &&
+      left.assignments[agent].variant === right.assignments[agent].variant
+    )
+  })
 }
 
 async function syncDirectory(directory: string): Promise<void> {
