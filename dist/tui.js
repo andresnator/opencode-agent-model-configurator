@@ -229,130 +229,11 @@ function isRecord2(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-// src/active-preset.ts
-import { randomBytes } from "node:crypto";
-import { mkdir, open, readFile as readFile2, rename, rm, unlink } from "node:fs/promises";
-import path2 from "node:path";
-import { TextDecoder } from "node:util";
-var ACTIVE_PRESET_FILE = "models-presets-active.json";
-var ACTIVE_PRESET_VERSION = 1;
-var DEFAULT_FILE_MODE = 384;
-var PRIVATE_DIRECTORY_MODE = 448;
-var ACTIVE_PRESET_DOCUMENT_KEYS = ["version", "activePreset"];
-var FORBIDDEN_KEYS = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
-var FATAL_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
-function activePresetFile(configFile) {
-  return path2.join(path2.dirname(configFile), ACTIVE_PRESET_FILE);
-}
-async function loadActivePreset(file) {
-  let bytes;
-  try {
-    bytes = await readFile2(file);
-  } catch (error) {
-    if (isMissing(error)) return void 0;
-    throw unreadableActivePresetState(file, error);
-  }
-  let content;
-  try {
-    content = FATAL_UTF8_DECODER.decode(bytes);
-  } catch {
-    throw invalidActivePresetState(file, "file is not valid UTF-8");
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(content);
-  } catch {
-    throw invalidActivePresetState(file, "malformed JSON");
-  }
-  return validateActivePresetDocument(parsed, file).activePreset;
-}
-async function saveActivePreset(file, activePreset) {
-  await loadActivePreset(file);
-  const document = { version: ACTIVE_PRESET_VERSION, activePreset };
-  validateActivePresetDocument(document, file);
-  await writeActivePreset(file, document);
-}
-async function clearActivePreset(file) {
-  try {
-    await unlink(file);
-  } catch (error) {
-    if (isMissing(error)) return;
-    throw error;
-  }
-  await syncDirectory(path2.dirname(file));
-}
-async function writeActivePreset(file, document) {
-  const rendered = `${JSON.stringify(document, null, 2)}
-`;
-  const directory = path2.dirname(file);
-  await mkdir(directory, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
-  const suffix = `${timestamp()}-${randomBytes(3).toString("hex")}`;
-  const temporary = `${file}.${suffix}.tmp`;
-  let temporaryOwned = false;
-  try {
-    const handle = await open(temporary, "wx", DEFAULT_FILE_MODE);
-    temporaryOwned = true;
-    try {
-      await handle.writeFile(rendered, "utf8");
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    await rename(temporary, file);
-    temporaryOwned = false;
-    await syncDirectory(directory);
-  } catch (error) {
-    if (temporaryOwned) await rm(temporary, { force: true }).catch(() => void 0);
-    throw error;
-  }
-}
-function validateActivePresetDocument(raw, file) {
-  if (!isRecord3(raw)) throw invalidActivePresetState(file, "root must be an object");
-  for (const key of Object.keys(raw)) {
-    if (FORBIDDEN_KEYS.has(key)) throw invalidActivePresetState(file, `root: forbidden key '${key}'`);
-    if (!ACTIVE_PRESET_DOCUMENT_KEYS.includes(key)) {
-      throw invalidActivePresetState(file, `root: unknown field '${key}'`);
-    }
-  }
-  if (!Object.hasOwn(raw, "version")) throw invalidActivePresetState(file, "version is missing");
-  if (raw.version !== ACTIVE_PRESET_VERSION) {
-    throw invalidActivePresetState(file, `unsupported version ${String(raw.version)}`);
-  }
-  if (!Object.hasOwn(raw, "activePreset") || typeof raw.activePreset !== "string" || raw.activePreset.length === 0) {
-    throw invalidActivePresetState(file, "activePreset must be a non-empty string");
-  }
-  return { version: ACTIVE_PRESET_VERSION, activePreset: raw.activePreset };
-}
-async function syncDirectory(directory) {
-  const handle = await open(directory, "r");
-  try {
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-}
-function invalidActivePresetState(file, reason) {
-  throw new Error(`Invalid active preset state at ${file}: ${reason}`);
-}
-function unreadableActivePresetState(file, error) {
-  const reason = error instanceof Error ? error.message : String(error);
-  return new Error(`Unable to read active preset state at ${file}: ${reason}`);
-}
-function timestamp() {
-  return (/* @__PURE__ */ new Date()).toISOString().replace(/[-:TZ.]/g, "").slice(0, 14);
-}
-function isRecord3(value) {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-function isMissing(error) {
-  return isRecord3(error) && error.code === "ENOENT";
-}
-
 // src/persistence.ts
-import { randomBytes as randomBytes2 } from "node:crypto";
-import { link, mkdir as mkdir2, open as open2, readFile as readFile3, rm as rm2, rmdir, stat } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { link, mkdir, open, readFile as readFile2, rm, rmdir, stat } from "node:fs/promises";
 import { homedir as homedir2 } from "node:os";
-import path3 from "node:path";
+import path2 from "node:path";
 
 // node_modules/.pnpm/jsonc-parser@3.3.1/node_modules/jsonc-parser/lib/esm/impl/scanner.js
 function createScanner(text, ignoreTrivia = false) {
@@ -1150,12 +1031,12 @@ function parseTree(text, errors = [], options = ParseOptions.DEFAULT) {
   }
   return result;
 }
-function findNodeAtLocation(root, path5) {
+function findNodeAtLocation(root, path4) {
   if (!root) {
     return void 0;
   }
   let node = root;
-  for (let segment of path5) {
+  for (let segment of path4) {
     if (typeof segment === "string") {
       if (node.type !== "object" || !Array.isArray(node.children)) {
         return void 0;
@@ -1509,14 +1390,14 @@ function getNodeType(value) {
 
 // node_modules/.pnpm/jsonc-parser@3.3.1/node_modules/jsonc-parser/lib/esm/impl/edit.js
 function setProperty(text, originalPath, value, options) {
-  const path5 = originalPath.slice();
+  const path4 = originalPath.slice();
   const errors = [];
   const root = parseTree(text, errors);
   let parent = void 0;
   let lastSegment = void 0;
-  while (path5.length > 0) {
-    lastSegment = path5.pop();
-    parent = findNodeAtLocation(root, path5);
+  while (path4.length > 0) {
+    lastSegment = path4.pop();
+    parent = findNodeAtLocation(root, path4);
     if (parent === void 0 && value !== void 0) {
       if (typeof lastSegment === "string") {
         value = { [lastSegment]: value };
@@ -1739,8 +1620,8 @@ function printParseErrorCode(code) {
   }
   return "<unknown ParseErrorCode>";
 }
-function modify(text, path5, value, options) {
-  return setProperty(text, path5, value, options);
+function modify(text, path4, value, options) {
+  return setProperty(text, path4, value, options);
 }
 function applyEdits(text, edits) {
   let sortedEdits = edits.slice(0).sort((a, b) => {
@@ -1766,8 +1647,8 @@ function applyEdits(text, edits) {
 // src/persistence.ts
 var CONFIG_JSON = "opencode.json";
 var CONFIG_JSONC = "opencode.jsonc";
-var DEFAULT_FILE_MODE2 = 384;
-var PRIVATE_DIRECTORY_MODE2 = 448;
+var DEFAULT_FILE_MODE = 384;
+var PRIVATE_DIRECTORY_MODE = 448;
 var FORMATTING_OPTIONS = { insertSpaces: true, tabSize: 2, eol: "\n" };
 var CONFIG_WRITE_OWNERSHIP = /* @__PURE__ */ Symbol("config-write-ownership");
 var CONFIG_SNAPSHOT_IDENTITIES = /* @__PURE__ */ new WeakMap();
@@ -1775,15 +1656,15 @@ var ConfigWriteConflictError = class extends Error {
 };
 async function resolveConfigFile(scope, runtime) {
   const root = scope === "global" ? globalConfigRoot(runtime) : projectConfigRoot(runtime);
-  const jsonc = path3.join(root, CONFIG_JSONC);
-  const json = path3.join(root, CONFIG_JSON);
+  const jsonc = path2.join(root, CONFIG_JSONC);
+  const json = path2.join(root, CONFIG_JSON);
   if (await exists(jsonc)) return jsonc;
   if (await exists(json)) return json;
   return json;
 }
 async function readConfigSnapshot(file) {
   try {
-    const handle = await open2(file, "r");
+    const handle = await open(file, "r");
     try {
       const [content, metadata] = await Promise.all([handle.readFile("utf8"), handle.stat()]);
       const config = parseConfig(content, file);
@@ -1794,8 +1675,8 @@ async function readConfigSnapshot(file) {
       await handle.close();
     }
   } catch (error) {
-    if (!isMissing2(error)) throw error;
-    return { file, exists: false, content: "{}\n", mode: DEFAULT_FILE_MODE2, mappings: {} };
+    if (!isMissing(error)) throw error;
+    return { file, exists: false, content: "{}\n", mode: DEFAULT_FILE_MODE, mappings: {} };
   }
 }
 function renderConfigChanges(snapshot, changes) {
@@ -1805,7 +1686,7 @@ function renderConfigChanges(snapshot, changes) {
       content = edit(content, ["agent", change.agent, "model"], void 0);
       content = edit(content, ["agent", change.agent, "variant"], void 0);
       const parsed2 = parseConfig(content, snapshot.file);
-      const agent = isRecord4(parsed2.agent) && isRecord4(parsed2.agent[change.agent]) ? parsed2.agent[change.agent] : void 0;
+      const agent = isRecord3(parsed2.agent) && isRecord3(parsed2.agent[change.agent]) ? parsed2.agent[change.agent] : void 0;
       if (agent && Object.keys(agent).length === 0) content = edit(content, ["agent", change.agent], void 0);
     } else {
       content = edit(content, ["agent", change.agent, "model"], change.after.model);
@@ -1813,12 +1694,12 @@ function renderConfigChanges(snapshot, changes) {
     }
   }
   const parsed = parseConfig(content, snapshot.file);
-  if (isRecord4(parsed.agent) && Object.keys(parsed.agent).length === 0) content = edit(content, ["agent"], void 0);
+  if (isRecord3(parsed.agent) && Object.keys(parsed.agent).length === 0) content = edit(content, ["agent"], void 0);
   parseConfig(content, snapshot.file);
   return content;
 }
-async function writeConfigChanges(snapshot, changes, hooks = {}) {
-  const written = await writeConfigChangesInternal(snapshot, changes, hooks);
+async function writeConfigChanges(snapshot, changes, hooks = {}, options = {}) {
+  const written = await writeConfigChangesInternal(snapshot, changes, hooks, { forceWrite: options.force });
   return written.result;
 }
 async function writeConfigChangesWithOwnership(snapshot, changes, hooks = {}) {
@@ -1867,7 +1748,7 @@ async function restoreOwnedConfigSnapshot(ownership) {
       );
     } catch (error) {
       await closeConfigWriteOwnership(ownership);
-      if (isMissing2(error)) throw configWriteConflict(snapshot, conflictMessage);
+      if (isMissing(error)) throw configWriteConflict(snapshot, conflictMessage);
       throw error;
     }
   }
@@ -1879,7 +1760,7 @@ async function restoreOwnedConfigSnapshot(ownership) {
     }
     publicationMoved = true;
   } catch (error) {
-    if (!isMissing2(error)) {
+    if (!isMissing(error)) {
       await closeConfigWriteOwnership(ownership);
       throw error;
     }
@@ -1921,12 +1802,12 @@ function isConfigWriteConflictError(error) {
   return error instanceof ConfigWriteConflictError;
 }
 async function writeConfigChangesInternal(snapshot, changes, hooks, options = {}) {
-  if (changes.length === 0) {
+  if (changes.length === 0 && !options.forceWrite) {
     await requireExpectedOwnership(snapshot, options);
     return { result: { file: snapshot.file } };
   }
   const rendered = renderConfigChanges(snapshot, changes);
-  if (rendered === snapshot.content) {
+  if (rendered === snapshot.content && !options.forceWrite) {
     await requireExpectedOwnership(snapshot, options);
     return { result: { file: snapshot.file } };
   }
@@ -1934,8 +1815,8 @@ async function writeConfigChangesInternal(snapshot, changes, hooks, options = {}
 }
 async function writeConfigContent(snapshot, rendered, hooks = {}, options = {}) {
   const { conflictMessage, expectedOwnership, retainOwnership = false } = options;
-  const directory = path3.dirname(snapshot.file);
-  await mkdir2(directory, { recursive: true, mode: PRIVATE_DIRECTORY_MODE2 });
+  const directory = path2.dirname(snapshot.file);
+  await mkdir(directory, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
   await requireExpectedOwnership(snapshot, options);
   if (snapshot.exists) {
     try {
@@ -1943,20 +1824,20 @@ async function writeConfigContent(snapshot, rendered, hooks = {}, options = {}) 
         throw configWriteConflict(snapshot, conflictMessage);
       }
     } catch (error) {
-      if (isMissing2(error)) throw configWriteConflict(snapshot, conflictMessage);
+      if (isMissing(error)) throw configWriteConflict(snapshot, conflictMessage);
       throw error;
     }
   } else if (await exists(snapshot.file)) {
     throw configWriteConflict(snapshot, conflictMessage);
   }
-  const suffix = `${timestamp2()}-${randomBytes2(3).toString("hex")}`;
+  const suffix = `${timestamp()}-${randomBytes(3).toString("hex")}`;
   const operationDirectory = `${snapshot.file}.${suffix}.write`;
   const artifacts = {
     directory: operationDirectory,
-    temporary: path3.join(operationDirectory, "temporary"),
-    claim: path3.join(operationDirectory, "claim"),
-    restoration: path3.join(operationDirectory, "restoration"),
-    recovery: path3.join(operationDirectory, "recovery")
+    temporary: path2.join(operationDirectory, "temporary"),
+    claim: path2.join(operationDirectory, "claim"),
+    restoration: path2.join(operationDirectory, "restoration"),
+    recovery: path2.join(operationDirectory, "recovery")
   };
   const state = {
     destinationClaimed: false,
@@ -1968,10 +1849,10 @@ async function writeConfigContent(snapshot, rendered, hooks = {}, options = {}) 
   const artifactOwnership = { identities: {}, preserved: /* @__PURE__ */ new Set() };
   try {
     await hooks.before?.("temporary-open");
-    await mkdir2(artifacts.directory, { mode: PRIVATE_DIRECTORY_MODE2 });
+    await mkdir(artifacts.directory, { mode: PRIVATE_DIRECTORY_MODE });
     artifactsOwned = true;
     artifactOwnership.identities.directory = await fileIdentity(artifacts.directory);
-    const handle = await open2(artifacts.temporary, "wx", mode);
+    const handle = await open(artifacts.temporary, "wx", mode);
     try {
       artifactOwnership.identities.temporary = identityFromMetadata(await handle.stat());
       await hooks.before?.("temporary-write");
@@ -1993,7 +1874,7 @@ async function writeConfigContent(snapshot, rendered, hooks = {}, options = {}) 
           "claim"
         );
       } catch (error) {
-        if (isMissing2(error)) throw configWriteConflict(snapshot, conflictMessage);
+        if (isMissing(error)) throw configWriteConflict(snapshot, conflictMessage);
         throw error;
       }
       state.claimMatchesSnapshot = await matchesWriteBaseline(
@@ -2017,9 +1898,9 @@ async function writeConfigContent(snapshot, rendered, hooks = {}, options = {}) 
     state.destinationPublished = true;
     await hooks.before?.("destination-flush");
     await syncFile(artifacts.temporary);
-    await syncDirectory2(directory);
+    await syncDirectory(directory);
     await hooks.before?.("post-validate");
-    const persisted = await readFile3(artifacts.temporary, "utf8");
+    const persisted = await readFile2(artifacts.temporary, "utf8");
     parseConfig(persisted, snapshot.file);
     if (persisted !== rendered) throw new Error(`${snapshot.file} did not persist the expected content`);
     if (!await isOwnedPublication(artifacts.temporary, snapshot.file, rendered, mode)) {
@@ -2043,7 +1924,7 @@ async function writeConfigContent(snapshot, rendered, hooks = {}, options = {}) 
     }
     await cleanupWriteArtifacts(artifacts, artifactOwnership);
     artifactsOwned = false;
-    await syncDirectory2(directory);
+    await syncDirectory(directory);
     return { result: { file: snapshot.file } };
   } catch (error) {
     if (!artifactsOwned) throw error;
@@ -2052,12 +1933,12 @@ async function writeConfigContent(snapshot, rendered, hooks = {}, options = {}) 
       ownershipLost = await recoverConfigWrite(snapshot, rendered, mode, artifacts, artifactOwnership, state, hooks);
       await cleanupWriteArtifacts(artifacts, artifactOwnership);
       artifactsOwned = false;
-      await syncDirectory2(directory);
+      await syncDirectory(directory);
     } catch (recoveryError) {
       try {
         await cleanupWriteArtifacts(artifacts, artifactOwnership);
         artifactsOwned = false;
-        await syncDirectory2(directory);
+        await syncDirectory(directory);
       } catch (cleanupError) {
         throw new AggregateError(
           [error, recoveryError, cleanupError],
@@ -2128,7 +2009,7 @@ async function transferConfigWriteOwnership(ownership, replacement) {
   current.artifacts = next.artifacts;
   current.artifactOwnership = next.artifactOwnership;
   next.active = false;
-  await syncDirectory2(path3.dirname(ownership.file));
+  await syncDirectory(path2.dirname(ownership.file));
 }
 async function requireExpectedOwnership(snapshot, options) {
   if (!options.expectedOwnership) return;
@@ -2145,7 +2026,7 @@ async function ownershipMatchesFile(ownership, file) {
   try {
     return await ownershipPublicationMatchesFile(state, file);
   } catch (error) {
-    if (isMissing2(error)) return false;
+    if (isMissing(error)) return false;
     throw error;
   }
 }
@@ -2159,7 +2040,7 @@ async function retainedClaimMatchesSnapshot(state) {
   try {
     return await matchesSnapshot(state.artifacts.claim, state.snapshot, state.mode);
   } catch (error) {
-    if (isMissing2(error)) return false;
+    if (isMissing(error)) return false;
     throw error;
   }
 }
@@ -2172,7 +2053,7 @@ async function preserveChangedRetainedClaim(ownership) {
     await reserveArtifactLink(artifacts.claim, artifacts.restoration, artifactOwnership, "restoration");
   } catch (error) {
     await closeConfigWriteOwnership(ownership);
-    if (isMissing2(error)) throw configWriteConflict(state.snapshot);
+    if (isMissing(error)) throw configWriteConflict(state.snapshot);
     throw error;
   }
   let publicationMoved = false;
@@ -2183,7 +2064,7 @@ async function preserveChangedRetainedClaim(ownership) {
   } catch (error) {
     artifactOwnership.preserved.add("restoration");
     await closeConfigWriteOwnership(ownership);
-    if (isMissing2(error)) throw configWriteConflict(state.snapshot);
+    if (isMissing(error)) throw configWriteConflict(state.snapshot);
     throw error;
   }
   try {
@@ -2198,7 +2079,7 @@ async function preserveChangedRetainedClaim(ownership) {
     }
     await restorePreservedArtifact(artifacts, artifactOwnership, "restoration", ownership.file);
     await syncFile(ownership.file);
-    await syncDirectory2(path3.dirname(ownership.file));
+    await syncDirectory(path2.dirname(ownership.file));
     return true;
   } catch (error) {
     let publicationRecoveryError;
@@ -2229,13 +2110,13 @@ async function discardConfigWriteOwnership(ownership) {
   }
   await cleanupWriteArtifacts(state.artifacts, state.artifactOwnership);
   state.active = false;
-  await syncDirectory2(path3.dirname(ownership.file));
+  await syncDirectory(path2.dirname(ownership.file));
 }
 async function closeConfigWriteOwnership(ownership) {
   const state = activeOwnership(ownership);
   await cleanupWriteArtifacts(state.artifacts, state.artifactOwnership);
   state.active = false;
-  await syncDirectory2(path3.dirname(ownership.file));
+  await syncDirectory(path2.dirname(ownership.file));
 }
 async function retainedClaimCanBeRemoved(state, destination) {
   return await retainedClaimMatchesSnapshot(state) || haveSameIdentity(state.artifacts.claim, destination);
@@ -2249,7 +2130,7 @@ async function recoverConfigWrite(snapshot, rendered, mode, artifacts, artifactO
         return true;
       }
     } catch (error) {
-      if (isMissing2(error)) return true;
+      if (isMissing(error)) return true;
       throw error;
     }
     if (!await isOwnedPublication(artifacts.temporary, artifacts.recovery, rendered, mode)) {
@@ -2298,16 +2179,16 @@ async function cleanupWriteArtifacts(artifacts, ownership) {
   try {
     await rmdir(artifacts.directory);
   } catch (error) {
-    if (!isMissing2(error) && !isDirectoryNotEmpty(error)) throw error;
+    if (!isMissing(error) && !isDirectoryNotEmpty(error)) throw error;
   }
 }
 async function removePathWithIdentity(file, identity) {
   if (!await pathHasIdentity(file, identity)) return false;
   try {
-    await rm2(file);
+    await rm(file);
     return true;
   } catch (error) {
-    if (isMissing2(error)) return false;
+    if (isMissing(error)) return false;
     throw error;
   }
 }
@@ -2315,7 +2196,7 @@ async function pathHasIdentity(file, identity) {
   try {
     return sameIdentity(identityFromMetadata(await stat(file)), identity);
   } catch (error) {
-    if (isMissing2(error)) return false;
+    if (isMissing(error)) return false;
     throw error;
   }
 }
@@ -2344,12 +2225,12 @@ async function isOwnedPublication(temporary, destination, rendered, mode) {
   const [temporaryMetadata, destinationMetadata, content] = await Promise.all([
     stat(temporary),
     stat(destination),
-    readFile3(temporary, "utf8")
+    readFile2(temporary, "utf8")
   ]);
   return temporaryMetadata.dev === destinationMetadata.dev && temporaryMetadata.ino === destinationMetadata.ino && (destinationMetadata.mode & 511) === mode && content === rendered;
 }
 async function matchesSnapshot(file, snapshot, mode) {
-  const handle = await open2(file, "r");
+  const handle = await open(file, "r");
   try {
     const [content, metadata] = await Promise.all([handle.readFile("utf8"), handle.stat()]);
     const expectedIdentity = CONFIG_SNAPSHOT_IDENTITIES.get(snapshot);
@@ -2363,7 +2244,7 @@ async function haveSameIdentity(left, right) {
     const [leftMetadata, rightMetadata] = await Promise.all([stat(left), stat(right)]);
     return leftMetadata.dev === rightMetadata.dev && leftMetadata.ino === rightMetadata.ino;
   } catch (error) {
-    if (isMissing2(error)) return false;
+    if (isMissing(error)) return false;
     throw error;
   }
 }
@@ -2379,28 +2260,28 @@ function higherPrecedenceWarning() {
 function globalConfigRoot(runtime) {
   if (runtime.config) return runtime.config;
   const xdgConfig = process.env.XDG_CONFIG_HOME;
-  return path3.join(xdgConfig || path3.join(homedir2(), ".config"), "opencode");
+  return path2.join(xdgConfig || path2.join(homedir2(), ".config"), "opencode");
 }
 function projectConfigRoot(runtime) {
   const root = runtime.worktree && runtime.worktree !== "/" ? runtime.worktree : runtime.directory;
-  return path3.join(root, ".opencode");
+  return path2.join(root, ".opencode");
 }
 function displayConfigFile(scope, file, runtime) {
   if (scope === "project") {
-    const projectRoot = path3.dirname(projectConfigRoot(runtime));
-    const relative = path3.relative(projectRoot, file);
+    const projectRoot = path2.dirname(projectConfigRoot(runtime));
+    const relative = path2.relative(projectRoot, file);
     return relative.startsWith("..") ? file : relative;
   }
   const home = homedir2();
   if (file === home) return "~";
-  if (file.startsWith(`${home}${path3.sep}`)) return `~${file.slice(home.length)}`;
+  if (file.startsWith(`${home}${path2.sep}`)) return `~${file.slice(home.length)}`;
   return file;
 }
 function extractMappings(config) {
-  if (!isRecord4(config.agent)) return {};
+  if (!isRecord3(config.agent)) return {};
   const mappings = {};
   for (const [agent, value] of Object.entries(config.agent)) {
-    if (!isRecord4(value)) continue;
+    if (!isRecord3(value)) continue;
     const model = typeof value.model === "string" ? value.model : void 0;
     const variant = typeof value.variant === "string" ? value.variant : void 0;
     mappings[agent] = { model, variant };
@@ -2417,7 +2298,7 @@ function parseConfig(content, file) {
     const first = errors[0];
     throw new Error(`${file}:${first.offset}: ${printParseErrorCode(first.error)}`);
   }
-  if (!isRecord4(parsed)) throw new Error(`${file}: configuration root must be an object`);
+  if (!isRecord3(parsed)) throw new Error(`${file}: configuration root must be an object`);
   return parsed;
 }
 async function exists(file) {
@@ -2425,52 +2306,52 @@ async function exists(file) {
     await stat(file);
     return true;
   } catch (error) {
-    if (isMissing2(error)) return false;
+    if (isMissing(error)) return false;
     throw error;
   }
 }
 async function syncFile(file) {
-  const handle = await open2(file, "r");
+  const handle = await open(file, "r");
   try {
     await handle.sync();
   } finally {
     await handle.close();
   }
 }
-async function syncDirectory2(directory) {
-  const handle = await open2(directory, "r");
+async function syncDirectory(directory) {
+  const handle = await open(directory, "r");
   try {
     await handle.sync();
   } finally {
     await handle.close();
   }
 }
-function timestamp2() {
+function timestamp() {
   return (/* @__PURE__ */ new Date()).toISOString().replace(/[-:TZ.]/g, "").slice(0, 14);
 }
-function isRecord4(value) {
+function isRecord3(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-function isMissing2(error) {
-  return isRecord4(error) && error.code === "ENOENT";
+function isMissing(error) {
+  return isRecord3(error) && error.code === "ENOENT";
 }
 function isAlreadyPresent(error) {
-  return isRecord4(error) && error.code === "EEXIST";
+  return isRecord3(error) && error.code === "EEXIST";
 }
 function isDirectoryNotEmpty(error) {
-  return isRecord4(error) && error.code === "ENOTEMPTY";
+  return isRecord3(error) && error.code === "ENOTEMPTY";
 }
 
 // src/hot-apply.ts
-async function applyConfigChanges(client, scope, runtime, snapshot, changes, hooks = {}) {
+async function applyConfigChanges(client, scope, runtime, snapshot, changes, hooks = {}, options = {}) {
   if (scope === "project") {
-    const result = await writeConfigChanges(snapshot, changes, hooks);
+    const result = await writeConfigChanges(snapshot, changes, hooks, { force: options.forceWrite });
     const hot = await disposeProjectInstance(client, runtime);
     return outcome(result.file, hot);
   }
   const plan = planGlobalHotApply(changes);
   if (plan.strategy === "write-only") {
-    const result = await writeConfigChanges(snapshot, changes, hooks);
+    const result = await writeConfigChanges(snapshot, changes, hooks, { force: options.forceWrite });
     return { file: result.file, hotApplied: false, detail: plan.reason };
   }
   const ownership = await writeConfigChangesWithOwnership(snapshot, plan.preludeChanges, hooks);
@@ -2580,32 +2461,32 @@ function errorReason(error) {
 }
 
 // src/presets.ts
-import { randomBytes as randomBytes3 } from "node:crypto";
-import { mkdir as mkdir3, open as open3, readFile as readFile4, rename as rename2, rm as rm3 } from "node:fs/promises";
-import path4 from "node:path";
-import { TextDecoder as TextDecoder2 } from "node:util";
+import { randomBytes as randomBytes2 } from "node:crypto";
+import { mkdir as mkdir2, open as open2, readFile as readFile3, rename, rm as rm2 } from "node:fs/promises";
+import path3 from "node:path";
+import { TextDecoder } from "node:util";
 var PRESETS_FILE = "model-configurator-presets.json";
 var PRESETS_VERSION = 1;
-var DEFAULT_FILE_MODE3 = 384;
+var DEFAULT_FILE_MODE2 = 384;
 var PRESET_DOCUMENT_KEYS = ["version", "presets"];
 var PRESET_KEYS = ["name", "savedAt", "assignments"];
 var ASSIGNMENT_KEYS = ["model", "variant"];
-var FORBIDDEN_KEYS2 = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
-var FATAL_UTF8_DECODER2 = new TextDecoder2("utf-8", { fatal: true, ignoreBOM: true });
+var FORBIDDEN_KEYS = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
+var FATAL_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 function presetsFile(runtime) {
-  return path4.join(globalConfigRoot(runtime), PRESETS_FILE);
+  return path3.join(globalConfigRoot(runtime), PRESETS_FILE);
 }
 async function loadPresets(file) {
   let bytes;
   try {
-    bytes = await readFile4(file);
+    bytes = await readFile3(file);
   } catch (error) {
-    if (isMissing3(error)) return [];
+    if (isMissing2(error)) return [];
     throw unreadablePresetStorage(file, error);
   }
   let content;
   try {
-    content = FATAL_UTF8_DECODER2.decode(bytes);
+    content = FATAL_UTF8_DECODER.decode(bytes);
   } catch {
     throw invalidPresetStorage(file, "file is not valid UTF-8");
   }
@@ -2649,13 +2530,13 @@ async function writePresets(file, presets) {
   validatePresetDocument(document, file);
   const rendered = `${JSON.stringify(document, null, 2)}
 `;
-  const directory = path4.dirname(file);
-  await mkdir3(directory, { recursive: true, mode: 448 });
-  const suffix = `${timestamp3()}-${randomBytes3(3).toString("hex")}`;
+  const directory = path3.dirname(file);
+  await mkdir2(directory, { recursive: true, mode: 448 });
+  const suffix = `${timestamp2()}-${randomBytes2(3).toString("hex")}`;
   const temporary = `${file}.${suffix}.tmp`;
   let temporaryOwned = false;
   try {
-    const handle = await open3(temporary, "wx", DEFAULT_FILE_MODE3);
+    const handle = await open2(temporary, "wx", DEFAULT_FILE_MODE2);
     temporaryOwned = true;
     try {
       await handle.writeFile(rendered, "utf8");
@@ -2663,16 +2544,16 @@ async function writePresets(file, presets) {
     } finally {
       await handle.close();
     }
-    await rename2(temporary, file);
+    await rename(temporary, file);
     temporaryOwned = false;
-    await syncDirectory3(directory);
+    await syncDirectory2(directory);
   } catch (error) {
-    if (temporaryOwned) await rm3(temporary, { force: true }).catch(() => void 0);
+    if (temporaryOwned) await rm2(temporary, { force: true }).catch(() => void 0);
     throw error;
   }
 }
 function validatePresetDocument(raw, file) {
-  if (!isRecord5(raw)) throw invalidPresetStorage(file, "root must be an object");
+  if (!isRecord4(raw)) throw invalidPresetStorage(file, "root must be an object");
   assertExactKeys(raw, PRESET_DOCUMENT_KEYS, "root", file);
   if (!Object.hasOwn(raw, "version")) throw invalidPresetStorage(file, "version is missing");
   if (typeof raw.version !== "number") throw invalidPresetStorage(file, "version must be numeric");
@@ -2693,8 +2574,8 @@ function validatePresetDocument(raw, file) {
   }
   return presets.sort((left, right) => left.name.localeCompare(right.name));
 }
-async function syncDirectory3(directory) {
-  const handle = await open3(directory, "r");
+async function syncDirectory2(directory) {
+  const handle = await open2(directory, "r");
   try {
     await handle.sync();
   } finally {
@@ -2703,7 +2584,7 @@ async function syncDirectory3(directory) {
 }
 function validatePreset(raw, index, file) {
   const presetPath = `presets[${index}]`;
-  if (!isRecord5(raw)) throw invalidPresetStorage(file, `${presetPath} must be an object`);
+  if (!isRecord4(raw)) throw invalidPresetStorage(file, `${presetPath} must be an object`);
   assertExactKeys(raw, PRESET_KEYS, presetPath, file);
   if (!Object.hasOwn(raw, "name") || typeof raw.name !== "string" || raw.name.length === 0) {
     throw invalidPresetStorage(file, `${presetPath}.name must be a non-empty string`);
@@ -2714,17 +2595,17 @@ function validatePreset(raw, index, file) {
   if (!Object.hasOwn(raw, "assignments")) {
     throw invalidPresetStorage(file, `${presetPath}.assignments is missing`);
   }
-  if (!isRecord5(raw.assignments)) {
+  if (!isRecord4(raw.assignments)) {
     throw invalidPresetStorage(file, `${presetPath}.assignments must be an object`);
   }
   const assignments = {};
   for (const agent of Object.keys(raw.assignments)) {
-    if (FORBIDDEN_KEYS2.has(agent)) {
+    if (FORBIDDEN_KEYS.has(agent)) {
       throw invalidPresetStorage(file, `${presetPath}.assignments: forbidden key '${agent}'`);
     }
     const value = raw.assignments[agent];
     const assignmentPath = `${presetPath}.assignments.${agent}`;
-    if (!isRecord5(value)) throw invalidPresetStorage(file, `${assignmentPath} must be an object`);
+    if (!isRecord4(value)) throw invalidPresetStorage(file, `${assignmentPath} must be an object`);
     assertExactKeys(value, ASSIGNMENT_KEYS, assignmentPath, file);
     if (!Object.hasOwn(value, "model") || typeof value.model !== "string" || value.model.length === 0) {
       throw invalidPresetStorage(file, `${assignmentPath}.model must be a non-empty string`);
@@ -2748,7 +2629,7 @@ function validatePreset(raw, index, file) {
 }
 function assertExactKeys(value, expectedKeys, location, file) {
   for (const key of Object.keys(value)) {
-    if (FORBIDDEN_KEYS2.has(key)) throw invalidPresetStorage(file, `${location}: forbidden key '${key}'`);
+    if (FORBIDDEN_KEYS.has(key)) throw invalidPresetStorage(file, `${location}: forbidden key '${key}'`);
     if (!expectedKeys.includes(key)) throw invalidPresetStorage(file, `${location}: unknown field '${key}'`);
   }
 }
@@ -2759,14 +2640,14 @@ function unreadablePresetStorage(file, error) {
   const reason = error instanceof Error ? error.message : String(error);
   return new Error(`Unable to read preset storage at ${file}: ${reason}`);
 }
-function timestamp3() {
+function timestamp2() {
   return (/* @__PURE__ */ new Date()).toISOString().replace(/[-:TZ.]/g, "").slice(0, 14);
 }
-function isRecord5(value) {
+function isRecord4(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
-function isMissing3(error) {
-  return isRecord5(error) && error.code === "ENOENT";
+function isMissing2(error) {
+  return isRecord4(error) && error.code === "ENOENT";
 }
 
 // src/wizard.tsx
@@ -2786,7 +2667,6 @@ var UPDATE_PRESET = "__update_preset__";
 var CANCEL = "__cancel__";
 var APPLY_PRESET = "__apply_preset__";
 var DELETE_PRESET = "__delete_preset__";
-var ACTIVE_PRESET_INFO = "__active_preset_info__";
 var PRESET_PREFIX = "__preset__:";
 var UPDATE_PRESET_PREFIX = "__update_preset__:";
 var GROUP_PREFIX = "__group__:";
@@ -2845,8 +2725,6 @@ async function runModelConfigurator(api, profilesRoot) {
       presetStorageAvailable,
       models,
       presetsPath,
-      activePresetStatus: "none",
-      activePresetStorageAvailable: true,
       showHidden: false
     };
     await runSteps(api, state);
@@ -2901,26 +2779,12 @@ async function runScopeStep(api, state) {
   state.scope = scope;
   state.configFile = scope === "project" ? projectFile : globalFile;
   state.snapshot = await readConfigSnapshot(state.configFile);
-  state.activePresetPath = activePresetFile(state.configFile);
-  state.activePresetStorageAvailable = true;
-  try {
-    state.activePresetName = await loadActivePreset(state.activePresetPath);
-    state.activePresetStatus = evaluateActivePresetStatus(state);
-  } catch (error) {
-    state.activePresetName = void 0;
-    state.activePresetStatus = "unavailable";
-    state.activePresetStorageAvailable = false;
-    api.ui.toast({
-      variant: "warning",
-      message: `Active preset state unavailable at ${state.activePresetPath}: ${errorMessage(error)} Repair the file and reopen model presets.`
-    });
-  }
   return "next";
 }
 async function runHubStep(api, state) {
   while (true) {
     const pending = state.decisions?.size ?? 0;
-    const options = [activePresetInfoOption(state)];
+    const options = [];
     if (pending > 0) {
       options.push({
         title: `Review ${pending} pending change${pending === 1 ? "" : "s"}`,
@@ -3091,23 +2955,6 @@ async function handlePresetChoice(api, state, preset) {
       return "reshow";
     }
     state.presets = state.presets.filter((entry) => entry.name !== preset.name);
-    if (state.activePresetName === preset.name && state.activePresetPath) {
-      try {
-        await clearActivePreset(state.activePresetPath);
-        state.activePresetName = void 0;
-        state.activePresetStatus = "none";
-      } catch (error) {
-        state.activePresetStorageAvailable = false;
-        state.activePresetStatus = "unavailable";
-        api.ui.toast({
-          variant: "error",
-          title: "Preset deleted; active state not cleared",
-          message: errorMessage(error),
-          duration: 8e3
-        });
-        return "reshow";
-      }
-    }
     api.ui.toast({ variant: "success", message: `Deleted preset "${preset.name}".` });
     return "reshow";
   }
@@ -3244,24 +3091,25 @@ async function runReviewStep(api, state) {
   const snapshot = state.snapshot;
   const decisions = state.decisions;
   const changes = calculateChanges(snapshot.mappings, decisions);
-  if (changes.length === 0) {
-    return activateMatchingPresetWithoutChanges(api, state);
+  const sourcePresetName = state.source?.kind === "preset" ? state.source.name : void 0;
+  if (changes.length === 0 && !sourcePresetName) {
+    api.ui.toast({ variant: "info", message: "No model assignment changes selected." });
+    return "back";
   }
   const warning = higherPrecedenceWarning();
   const categoryOf = reviewCategories(state.agents);
   const rows = [...changes].sort(
     (left, right) => (categoryOf.get(left.agent) ?? "other").localeCompare(categoryOf.get(right.agent) ?? "other") || left.agent.localeCompare(right.agent)
   );
-  const sourcePresetName = state.source?.kind === "preset" ? state.source.name : void 0;
-  const namedStorageAvailable = state.presetStorageAvailable && state.activePresetStorageAvailable;
+  const namedStorageAvailable = state.presetStorageAvailable;
   const unavailable = namedWriteUnavailableDescription(state);
   const title = sourcePresetName ? `Apply ${changes.length} model change${changes.length === 1 ? "" : "s"} from preset "${sourcePresetName}"?` : `Apply ${changes.length} model change${changes.length === 1 ? "" : "s"} with a preset?`;
   const actions = sourcePresetName ? [
     {
       title: `Apply preset "${sourcePresetName}"`,
       value: APPLY_NAMED_PRESET,
-      description: state.activePresetStorageAvailable ? warning || void 0 : unavailable,
-      disabled: !state.activePresetStorageAvailable
+      description: namedStorageAvailable ? warning || void 0 : unavailable,
+      disabled: !namedStorageAvailable
     }
   ] : [
     {
@@ -3297,8 +3145,7 @@ async function runReviewStep(api, state) {
   if (choice === CANCEL) return "done";
   if (sourcePresetName && choice !== APPLY_NAMED_PRESET) return "back";
   if (!sourcePresetName && choice !== CREATE_PRESET && choice !== UPDATE_PRESET) return "back";
-  if (sourcePresetName && !state.activePresetStorageAvailable) return "back";
-  if (!sourcePresetName && !namedStorageAvailable) return "back";
+  if (!namedStorageAvailable) return "back";
   if (choice === UPDATE_PRESET && state.presets.length === 0) return "back";
   let presetName = sourcePresetName;
   let presetMutated = false;
@@ -3339,77 +3186,32 @@ async function runReviewStep(api, state) {
       return "done";
     }
   }
-  try {
-    await saveActivePreset(state.activePresetPath, presetName);
-    state.activePresetName = presetName;
-  } catch (error) {
-    state.activePresetStorageAvailable = false;
-    state.activePresetStatus = "unavailable";
-    api.ui.toast({
-      variant: "error",
-      title: "Active preset not saved",
-      message: `${presetMutated ? `Preset "${presetName}" was saved, but ` : ""}${errorMessage(error)} Configuration was not applied.`,
-      duration: 8e3
-    });
-    return "done";
-  }
   let result;
   try {
-    result = await applyConfigChanges(api.client, state.scope, api.state.path, snapshot, changes);
+    result = await applyConfigChanges(
+      api.client,
+      state.scope,
+      api.state.path,
+      snapshot,
+      changes,
+      {},
+      { forceWrite: sourcePresetName !== void 0 }
+    );
   } catch (error) {
-    state.activePresetStatus = "desynchronized";
     api.ui.toast({
       variant: "error",
       title: "Configuration not applied",
-      message: presetMutated ? `Preset "${presetName}" was saved, but ${errorMessage(error)}` : `Preset "${presetName}" was marked active, but ${errorMessage(error)}`,
+      message: presetMutated ? `Preset "${presetName}" was saved, but ${errorMessage(error)}` : `Preset "${presetName}" was not applied: ${errorMessage(error)}`,
       duration: 8e3
     });
     return "done";
   }
-  const appliedPreset = state.presets.find((entry) => entry.name === presetName);
-  state.activePresetStatus = appliedPreset && presetMatchesAssignments(appliedPreset, assignments, state) ? "synchronized" : "desynchronized";
   api.ui.toast({
     variant: "success",
     title: "Agent models updated",
-    message: result.hotApplied ? `Preset "${presetName}" is active. Wrote ${result.file}. Applied live to this OpenCode server; other running OpenCode processes still need a restart.` : `Preset "${presetName}" is active. Wrote ${result.file}. Restart OpenCode sessions to apply the assignments (${result.detail}).`,
+    message: result.hotApplied ? `Applied preset "${presetName}". Wrote ${result.file}. Applied live to this OpenCode server; other running OpenCode processes still need a restart.` : `Applied preset "${presetName}". Wrote ${result.file}. Restart OpenCode sessions to apply the assignments (${result.detail}).`,
     duration: 8e3
   });
-  return "done";
-}
-async function activateMatchingPresetWithoutChanges(api, state) {
-  if (state.source?.kind !== "preset") {
-    api.ui.toast({ variant: "info", message: "No model assignment changes selected." });
-    return "back";
-  }
-  const sourcePresetName = state.source.name;
-  const preset = await refreshSelectedPreset(api, state, sourcePresetName);
-  if (!preset) return "exit";
-  const [snapshot, catalog] = await Promise.all([readConfigSnapshot(state.configFile), loadCatalog(api)]);
-  state.snapshot = snapshot;
-  state.models = flattenModels(catalog);
-  state.activePresetStatus = evaluateActivePresetStatus(state);
-  if (!presetMatchesCurrent(preset, state)) {
-    api.ui.toast({
-      variant: "info",
-      message: `Preset "${sourcePresetName}" has no model changes to apply but does not fully match the current configuration.`
-    });
-    return "back";
-  }
-  if (!state.activePresetStorageAvailable) {
-    api.ui.toast({ variant: "error", title: "Active preset not saved", message: namedWriteUnavailableDescription(state) });
-    return "done";
-  }
-  try {
-    await saveActivePreset(state.activePresetPath, preset.name);
-  } catch (error) {
-    state.activePresetStorageAvailable = false;
-    state.activePresetStatus = "unavailable";
-    api.ui.toast({ variant: "error", title: "Active preset not saved", message: errorMessage(error), duration: 8e3 });
-    return "done";
-  }
-  state.activePresetName = preset.name;
-  state.activePresetStatus = "synchronized";
-  api.ui.toast({ variant: "success", title: "Preset active", message: `Preset "${preset.name}" already matches this configuration.` });
   return "done";
 }
 async function promptNewPresetName(api, state) {
@@ -3429,7 +3231,6 @@ async function promptNewPresetName(api, state) {
   }
 }
 async function selectPresetToUpdate(api, state) {
-  const current = state.presets.some((preset) => preset.name === state.activePresetName) ? UPDATE_PRESET_PREFIX + state.activePresetName : void 0;
   const selected = await select(
     api,
     "Select preset to update",
@@ -3438,8 +3239,7 @@ async function selectPresetToUpdate(api, state) {
       value: UPDATE_PRESET_PREFIX + preset.name,
       description: presetDescription(preset)
     })),
-    BACK_HINT,
-    current
+    BACK_HINT
   );
   return selected?.startsWith(UPDATE_PRESET_PREFIX) ? selected.slice(UPDATE_PRESET_PREFIX.length) : void 0;
 }
@@ -3481,26 +3281,6 @@ function resolvePresetAssignments(current, changes, knownAgents) {
   }
   return assignments;
 }
-function evaluateActivePresetStatus(state) {
-  if (!state.presetStorageAvailable || !state.activePresetStorageAvailable) return "unavailable";
-  if (!state.activePresetName) return "none";
-  const preset = state.presets.find((entry) => entry.name === state.activePresetName);
-  if (!preset) return "missing";
-  return presetMatchesCurrent(preset, state) ? "synchronized" : "desynchronized";
-}
-function presetMatchesCurrent(preset, state) {
-  const assignments = resolvePresetAssignments(state.snapshot.mappings, [], state.agents.map((agent) => agent.name));
-  return presetMatchesAssignments(preset, assignments, state);
-}
-function presetMatchesAssignments(preset, assignments, state) {
-  const { valid, stale } = partitionPresetAssignments(
-    preset.assignments,
-    state.agents.map((agent) => agent.name),
-    state.models
-  );
-  if (stale.length > 0) return false;
-  return assignmentRecordsEqual(valid, assignments);
-}
 function assignmentRecordsEqual(left, right) {
   const leftAgents = Object.keys(left).sort();
   const rightAgents = Object.keys(right).sort();
@@ -3510,23 +3290,6 @@ function assignmentRecordsEqual(left, right) {
     return left[agent].model === right[agent].model && left[agent].variant === right[agent].variant;
   });
 }
-function activePresetInfoOption(state) {
-  const name = state.activePresetName ?? "none";
-  const descriptions = {
-    none: "Changes must be saved under a preset before they can be applied",
-    synchronized: `Matches the current ${state.scope} assignments`,
-    desynchronized: `Does not match the current ${state.scope} assignments`,
-    missing: "The referenced preset no longer exists",
-    unavailable: "Preset identity is unavailable; repair its storage and reopen model presets"
-  };
-  return {
-    title: `Active preset: ${name}`,
-    value: ACTIVE_PRESET_INFO,
-    description: descriptions[state.activePresetStatus],
-    category: "Configuration",
-    disabled: true
-  };
-}
 function presetDescription(preset) {
   const count = Object.keys(preset.assignments).length;
   const saved = preset.savedAt ? ` \u2014 saved ${preset.savedAt.slice(0, 10)}` : "";
@@ -3534,9 +3297,6 @@ function presetDescription(preset) {
 }
 function namedWriteUnavailableDescription(state) {
   if (!state.presetStorageAvailable) return "Repair preset storage and reopen model presets to enable named applies.";
-  if (!state.activePresetStorageAvailable) {
-    return "Repair active preset state and reopen model presets to enable named applies.";
-  }
   return "Named apply is unavailable.";
 }
 async function selectDecision(api, title, models, suggestedVariant, currentSummary) {

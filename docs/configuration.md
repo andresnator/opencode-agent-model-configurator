@@ -53,9 +53,7 @@ Every assignment write has a preset identity. After configuring agents or using 
 - **Create new preset** prompts for a new, non-empty name. An existing name must be chosen through the update flow.
 - **Update existing preset** opens the saved preset list and replaces the selected entry without asking you to type its name again.
 
-Starting from a saved preset instead shows **Apply preset "name"**. If that preset already matches every live concrete assignment, the plugin marks it active without rewriting `opencode.json(c)`.
-
-The active name is stored per scope in `models-presets-active.json`, next to the resolved `opencode.json(c)`. This sidecar is separate because OpenCode's configuration schema does not accept plugin-specific top-level fields. The agent hub reports whether the active preset matches the current assignments, has diverged, or no longer exists. External configuration edits are allowed and appear as divergence the next time the wizard opens.
+Starting from a saved preset instead shows **Apply preset "name"**. The normal configuration write still runs when that preset already matches every live concrete assignment; the plugin does not persist or infer an active preset.
 
 Before applying a preset, the plugin checks its assignments against the live agents, connected providers, models, and variants. It identifies stale entries and skips them before applying any valid remainder. It does not silently delete the saved preset.
 
@@ -73,7 +71,6 @@ If the written assignment is not the value OpenCode uses, follow [Environment va
 | --- | --- |
 | Project or global OpenCode configuration | Writes targeted `agent.<name>.model` and `agent.<name>.variant` values; preserves unrelated JSONC keys, comments, and file mode |
 | Global preset store | Writes saved concrete assignments to `model-configurator-presets.json` |
-| Active preset state | Writes `models-presets-active.json` next to the selected project or global configuration |
 | Profile files | Reads them as optional input; does not write them |
 | `tui.json` | Reads the plugin registration and `profilesDir` option; Models Presets does not edit it |
 
@@ -83,10 +80,10 @@ Models Presets writes model identifiers and variants; it never writes provider c
 
 Named apply and assignment writes follow this order:
 
-1. The plugin reloads the live model catalog, then writes the preset and active sidecar; each named-state file is replaced atomically. If either write fails, it does not write `opencode.json(c)`.
+1. The plugin reloads the live model catalog. When creating or updating a preset, it replaces the global preset store atomically; if that write fails, it does not write `opencode.json(c)`.
 2. Before writing the assignment destination, it compares it with the snapshot opened by the wizard. If the file changed or appeared in the meantime, it aborts instead of overwriting newer content.
 3. It writes and flushes a temporary file, atomically replaces the destination, preserves the destination mode, and validates the persisted content.
-4. If assignment persistence fails after its transaction starts, recovery restores the previous configuration content or removes a destination created by the failed attempt. The already-saved preset and sidecar remain available and are reported as desynchronized.
+4. If assignment persistence fails after its transaction starts, recovery restores the previous configuration content or removes a destination created by the failed attempt. A preset saved before that failure remains available for a later retry.
 
 Use the focused recovery steps for [a concurrent change](troubleshooting.md#the-configuration-changed-while-the-wizard-was-open) or [a write failure](troubleshooting.md#the-configuration-cannot-be-written).
 
@@ -98,7 +95,7 @@ The completion message distinguishes a successful write from live application:
 | --- | --- |
 | Applied live | The current OpenCode server has the assignments. Restart any other running OpenCode processes. |
 | Restart required | The file was written, but the applicable reload route was unavailable, rejected the update, or could not apply a global removal-only change. Restart the affected OpenCode sessions. |
-| Preset saved, configuration not applied | The named intent remains saved and is shown as desynchronized. Resolve the reported configuration failure, reopen, and retry. |
+| Preset saved, configuration not applied | The named preset remains saved. Resolve the reported configuration failure, reopen, and retry. |
 | Error before completion | Do not assume a write succeeded. Follow the reported path and the matching recovery symptom. |
 
 See [Changes were written but are not active](troubleshooting.md#changes-were-written-but-are-not-active) for restart recovery.

@@ -6,13 +6,6 @@ import { syncBuiltinESMExports } from "node:module"
 import { homedir, tmpdir } from "node:os"
 import path from "node:path"
 import {
-  ACTIVE_PRESET_FILE,
-  activePresetFile,
-  clearActivePreset,
-  loadActivePreset,
-  saveActivePreset,
-} from "../src/active-preset"
-import {
   buildAgentHierarchy,
   calculateChanges,
   formatMapping,
@@ -1087,55 +1080,6 @@ async function shouldBlockConfigurationWriteWhenPresetStorageIsUnreadable(): Pro
   }
 }
 
-async function shouldBlockConfigurationWriteWhenActivePresetStateIsUnavailable(): Promise<void> {
-  const scratch = await createWizardFixture()
-  try {
-    // Given malformed active preset state and an otherwise valid configuration flow
-    const configFile = path.join(scratch.project, ".opencode", "opencode.jsonc")
-    const original = await readFile(configFile, "utf8")
-    const activePath = path.join(path.dirname(configFile), ACTIVE_PRESET_FILE)
-    const malformed = "not json\n"
-    await writeFile(activePath, malformed)
-    const toasts: TuiToast[] = []
-    let reviewOptions: PolicyOption[] = []
-    const api = createFakeApi(scratch, toasts, {
-      select(title, options) {
-        if (title === "Configuration scope") return option(options, "project")
-        if (title === "Agents") return option(options, "default")
-        if (title === "Tier: high") return option(options, "openai/new")
-        if (title === "Variant for openai/new") return option(options, "high")
-        if (title === "Tier: low") return option(options, "__keep_current__")
-        if (title === "Individual overrides") return option(options, "__override_no__")
-        if (title.startsWith("Apply ")) {
-          reviewOptions = options
-          return option(options, "__cancel__")
-        }
-        throw new Error(`unexpected select dialog: ${title}`)
-      },
-      confirm() {
-        return true
-      },
-    })
-
-    // When the wizard reaches the named apply review
-    await runModelConfigurator(api, scratch.profiles)
-
-    // Then both named actions are disabled and neither local file is replaced
-    assert.equal(reviewOptions.find((candidate) => candidate.value === "__create_preset__")?.disabled, true)
-    assert.equal(reviewOptions.find((candidate) => candidate.value === "__update_preset__")?.disabled, true)
-    assert.equal(await readFile(configFile, "utf8"), original)
-    assert.equal(await readFile(activePath, "utf8"), malformed)
-    assert.ok(
-      toasts.some(
-        (toast) => toast.variant === "warning" && toast.message?.includes(`Active preset state unavailable at ${activePath}`),
-      ),
-    )
-    pass("shouldBlockConfigurationWriteWhenActivePresetStateIsUnavailable")
-  } finally {
-    await rm(scratch.root, { recursive: true, force: true })
-  }
-}
-
 async function shouldRestorePresetStorageWhenWizardReopensAfterRepair(): Promise<void> {
   const scratch = await createWizardFixture()
   try {
@@ -1320,7 +1264,7 @@ async function shouldReloadAndRejectStaleSelectionAfterFinalApplyInteraction(): 
   }
 }
 
-async function shouldKeepNamedPresetAndShowDriftWhenConfigurationApplyFails(): Promise<void> {
+async function shouldKeepNamedPresetWhenConfigurationApplyFails(): Promise<void> {
   const scratch = await createWizardFixture()
   try {
     // Given a configuration that changes concurrently after the named review opens
@@ -1350,43 +1294,19 @@ async function shouldKeepNamedPresetAndShowDriftWhenConfigurationApplyFails(): P
       },
     })
 
-    // When preset and sidecar persistence succeed but the config write detects the conflict
+    // When preset persistence succeeds but the config write detects the conflict
     await runModelConfigurator(api, scratch.profiles)
 
     // Then the concurrent config survives and the named intent remains available
     assert.equal(await readFile(configFile, "utf8"), concurrent)
     assert.equal((await loadPresets(path.join(scratch.global, "model-configurator-presets.json")))[0]?.name, "planned")
-    assert.equal(await loadActivePreset(path.join(path.dirname(configFile), ACTIVE_PRESET_FILE)), "planned")
     assert.ok(
       toasts.some(
         (toast) => toast.variant === "error" && toast.title === "Configuration not applied" && toast.message?.includes('Preset "planned" was saved'),
       ),
     )
 
-    // When the configurator is reopened
-    let scopeVisits = 0
-    let activeDescription = ""
-    const reopened = createFakeApi(scratch, [], {
-      select(title, options) {
-        if (title === "Configuration scope") {
-          scopeVisits += 1
-          return scopeVisits === 1 ? option(options, "project") : "escape"
-        }
-        if (title === "Agents") {
-          activeDescription = options.find((candidate) => candidate.value === "__active_preset_info__")?.description ?? ""
-          return "escape"
-        }
-        throw new Error(`unexpected select dialog: ${title}`)
-      },
-      confirm() {
-        return true
-      },
-    })
-    await runModelConfigurator(reopened, scratch.profiles)
-
-    // Then the active name is explicitly reported as desynchronized
-    assert.match(activeDescription, /Does not match/)
-    pass("shouldKeepNamedPresetAndShowDriftWhenConfigurationApplyFails")
+    pass("shouldKeepNamedPresetWhenConfigurationApplyFails")
   } finally {
     await rm(scratch.root, { recursive: true, force: true })
   }
@@ -1468,7 +1388,7 @@ async function shouldExitWithoutWritingWhenScopeIsEscaped(): Promise<void> {
   }
 }
 
-async function shouldCreateNamedPresetAndActiveSidecarWhenApplying(): Promise<void> {
+async function shouldCreateNamedPresetWhenApplying(): Promise<void> {
   const scratch = await createWizardFixture()
   try {
     // Given a run that inherits beta then applies-and-saves under a name
@@ -1507,7 +1427,7 @@ async function shouldCreateNamedPresetAndActiveSidecarWhenApplying(): Promise<vo
     // When
     await runModelConfigurator(api, scratch.profiles)
 
-    // Then no bare Apply action exists, and the config plus active preset identity are persisted
+    // Then no bare Apply action exists, and the configuration plus named preset are persisted
     assert.equal(reviewOptions.some((candidate) => candidate.title === "Apply"), false)
     assert.equal(reviewOptions.find((candidate) => candidate.value === "__create_preset__")?.title, "Create new preset")
     assert.equal(reviewOptions.find((candidate) => candidate.value === "__update_preset__")?.disabled, true)
@@ -1517,8 +1437,7 @@ async function shouldCreateNamedPresetAndActiveSidecarWhenApplying(): Promise<vo
     assert.equal(presets.length, 1)
     assert.equal(presets[0].name, "prod")
     assert.deepEqual(presets[0].assignments, { alpha: { model: "openai/new", variant: "high" } })
-    assert.equal(await loadActivePreset(path.join(path.dirname(configFile), ACTIVE_PRESET_FILE)), "prod")
-    pass("shouldCreateNamedPresetAndActiveSidecarWhenApplying")
+    pass("shouldCreateNamedPresetWhenApplying")
   } finally {
     await rm(scratch.root, { recursive: true, force: true })
   }
@@ -1618,7 +1537,6 @@ async function shouldApplyPresetSkippingTiersAndOverrides(): Promise<void> {
       beta: { model: "anthropic/old", variant: undefined },
     })
     assert.equal(applyActionTitle, 'Apply preset "saved"')
-    assert.equal(await loadActivePreset(path.join(path.dirname(configFile), ACTIVE_PRESET_FILE)), "saved")
     assert.equal(toasts.at(-1)?.variant, "success")
     pass("shouldApplyPresetSkippingTiersAndOverrides")
   } finally {
@@ -1665,7 +1583,6 @@ async function shouldRejectPresetChangedAfterItWasSelected(): Promise<void> {
     // Then it preserves the newer preset and configuration and asks for a fresh selection
     assert.equal(await readFile(configFile, "utf8"), original)
     assert.deepEqual(await loadPresets(presetsPath), changed.presets)
-    assert.equal(await loadActivePreset(path.join(path.dirname(configFile), ACTIVE_PRESET_FILE)), undefined)
     assert.ok(toasts.some((toast) => toast.variant === "warning" && toast.message?.includes('Preset "changing" changed')))
     pass("shouldRejectPresetChangedAfterItWasSelected")
   } finally {
@@ -1673,7 +1590,7 @@ async function shouldRejectPresetChangedAfterItWasSelected(): Promise<void> {
   }
 }
 
-async function shouldActivateMatchingPresetWithoutRewritingConfiguration(): Promise<void> {
+async function shouldRewriteConfigurationWhenApplyingMatchingPreset(): Promise<void> {
   const scratch = await createWizardFixture()
   try {
     // Given a saved preset that already matches every live concrete assignment
@@ -1683,6 +1600,7 @@ async function shouldActivateMatchingPresetWithoutRewritingConfiguration(): Prom
       '{\n  "agent": {\n    "alpha": {"model": "openai/new", "variant": "high"},\n    "beta": {"model": "anthropic/old"}\n  }\n}\n',
     )
     const original = await readFile(configFile, "utf8")
+    const originalMetadata = await stat(configFile)
     const presetsPath = path.join(scratch.global, "model-configurator-presets.json")
     await savePreset(presetsPath, {
       name: "matching",
@@ -1695,6 +1613,7 @@ async function shouldActivateMatchingPresetWithoutRewritingConfiguration(): Prom
         if (title === "Configuration scope") return option(options, "project")
         if (title === "Agents") return option(options, "__preset__:matching")
         if (title === "Preset: matching") return option(options, "__apply_preset__")
+        if (title.startsWith("Apply ")) return option(options, "__apply_named_preset__")
         throw new Error(`unexpected select dialog: ${title}`)
       },
       confirm() {
@@ -1705,96 +1624,15 @@ async function shouldActivateMatchingPresetWithoutRewritingConfiguration(): Prom
     // When the matching preset is applied
     await runModelConfigurator(api, scratch.profiles)
 
-    // Then only its active identity is written
+    // Then the normal configuration publication still replaces the matching file
     assert.equal(await readFile(configFile, "utf8"), original)
-    assert.equal(await loadActivePreset(path.join(path.dirname(configFile), ACTIVE_PRESET_FILE)), "matching")
-    assert.deepEqual(toasts.at(-1), {
-      variant: "success",
-      title: "Preset active",
-      message: 'Preset "matching" already matches this configuration.',
-    })
-    pass("shouldActivateMatchingPresetWithoutRewritingConfiguration")
+    assert.equal(sameFileIdentity(originalMetadata, await stat(configFile)), false)
+    assert.equal(toasts.at(-1)?.title, "Agent models updated")
+    assert.equal(toasts.at(-1)?.message?.includes('Applied preset "matching"'), true)
+    pass("shouldRewriteConfigurationWhenApplyingMatchingPreset")
   } finally {
     await rm(scratch.root, { recursive: true, force: true })
   }
-}
-
-async function shouldRevalidateConfigurationAndCatalogBeforeNoOpActivation(): Promise<void> {
-  for (const changedSource of ["configuration", "catalog"] as const) {
-    const scratch = await createWizardFixture()
-    try {
-      // Given a preset that matches the configuration and catalog loaded at scope selection
-      const configFile = path.join(scratch.project, ".opencode", "opencode.jsonc")
-      await writeJsonc(
-        configFile,
-        '{\n  "agent": {\n    "alpha": {"model": "openai/new", "variant": "high"},\n    "beta": {"model": "anthropic/old"}\n  }\n}\n',
-      )
-      const changedConfig =
-        '{\n  "agent": {\n    "alpha": {"model": "anthropic/old"},\n    "beta": {"model": "anthropic/old"}\n  }\n}\n'
-      const presetsPath = path.join(scratch.global, "model-configurator-presets.json")
-      await savePreset(presetsPath, {
-        name: "matching",
-        savedAt: "2026-01-01T00:00:00.000Z",
-        assignments: { alpha: { model: "openai/new", variant: "high" }, beta: { model: "anthropic/old" } },
-      })
-      const toasts: TuiToast[] = []
-      let scopeVisits = 0
-      let hubVisits = 0
-      let catalogChanged = false
-      let activeTitle = ""
-      const api = createFakeApi(scratch, toasts, {
-        select(title, options) {
-          if (title === "Configuration scope") {
-            scopeVisits += 1
-            return scopeVisits === 1 ? option(options, "project") : "escape"
-          }
-          if (title === "Agents") {
-            hubVisits += 1
-            if (hubVisits === 1) return option(options, "__preset__:matching")
-            activeTitle = options.find((candidate) => candidate.value === "__active_preset_info__")?.title ?? ""
-            return "escape"
-          }
-          if (title === "Preset: matching") {
-            if (changedSource === "configuration") writeFileSync(configFile, changedConfig)
-            else catalogChanged = true
-            return option(options, "__apply_preset__")
-          }
-          throw new Error(`unexpected select dialog: ${title}`)
-        },
-        confirm() {
-          return true
-        },
-      })
-      const provider = api.client.provider as unknown as { list: () => Promise<unknown> }
-      const listInitialCatalog = provider.list.bind(provider)
-      provider.list = async () =>
-        catalogChanged
-          ? {
-              data: {
-                connected: ["anthropic"],
-                all: [{ id: "anthropic", models: { old: { variants: {} } } }],
-              },
-            }
-          : listInitialCatalog()
-
-      // When the configuration or provider catalog changes immediately before no-op activation
-      await runModelConfigurator(api, scratch.profiles)
-
-      // Then the latest state prevents activation and is reflected when the hub reopens
-      assert.equal(await loadActivePreset(path.join(path.dirname(configFile), ACTIVE_PRESET_FILE)), undefined)
-      assert.equal(activeTitle, "Active preset: none")
-      assert.ok(
-        toasts.some(
-          (toast) => toast.variant === "info" && toast.message?.includes("does not fully match the current configuration"),
-        ),
-        `${changedSource} change did not block activation`,
-      )
-      assert.equal(toasts.some((toast) => toast.title === "Preset active"), false)
-    } finally {
-      await rm(scratch.root, { recursive: true, force: true })
-    }
-  }
-  pass("shouldRevalidateConfigurationAndCatalogBeforeNoOpActivation")
 }
 
 async function shouldPreservePresetIdentityWhenReturningToPendingReview(): Promise<void> {
@@ -1837,7 +1675,6 @@ async function shouldPreservePresetIdentityWhenReturningToPendingReview(): Promi
     // Then the preset keeps its named apply action and is applied under that identity
     assert.equal(reviewVisits, 2)
     assert.equal(secondApplyTitle, 'Apply preset "saved"')
-    assert.equal(await loadActivePreset(path.join(path.dirname(configFile), ACTIVE_PRESET_FILE)), "saved")
     assert.deepEqual((await readConfigSnapshot(configFile)).mappings, {
       alpha: { model: "openai/new", variant: "high" },
       beta: { model: "anthropic/old", variant: undefined },
@@ -1896,7 +1733,6 @@ async function shouldClearPresetIdentityWhenPendingDecisionsAreModified(): Promi
 
     // Then the altered decisions no longer claim the selected preset's identity
     assert.equal(sawCreateAction, true)
-    assert.equal(await loadActivePreset(path.join(path.dirname(configFile), ACTIVE_PRESET_FILE)), undefined)
     assert.equal(await readFile(configFile, "utf8"), original)
     pass("shouldClearPresetIdentityWhenPendingDecisionsAreModified")
   } finally {
@@ -1904,62 +1740,7 @@ async function shouldClearPresetIdentityWhenPendingDecisionsAreModified(): Promi
   }
 }
 
-async function shouldShowWhetherActivePresetMatchesCurrentConfiguration(): Promise<void> {
-  const scenarios: Array<{ assignments: Record<string, { model: string; variant?: string }>; status: RegExp }> = [
-    {
-      assignments: { alpha: { model: "openai/new", variant: "high" }, beta: { model: "anthropic/old" } },
-      status: /Matches the current project/,
-    },
-    { assignments: { alpha: { model: "openai/new", variant: "low" } }, status: /Does not match the current project/ },
-  ]
-  for (const scenario of scenarios) {
-    const scratch = await createWizardFixture()
-    try {
-      // Given a persisted active preset that either matches or differs from the selected scope
-      const configFile = path.join(scratch.project, ".opencode", "opencode.jsonc")
-      await writeJsonc(
-        configFile,
-        '{\n  "agent": {\n    "alpha": {"model": "openai/new", "variant": "high"},\n    "beta": {"model": "anthropic/old"}\n  }\n}\n',
-      )
-      await savePreset(path.join(scratch.global, "model-configurator-presets.json"), {
-        name: "tracked",
-        savedAt: "2026-01-01T00:00:00.000Z",
-        assignments: scenario.assignments,
-      })
-      await saveActivePreset(path.join(path.dirname(configFile), ACTIVE_PRESET_FILE), "tracked")
-      let scopeVisits = 0
-      let activeInfo: PolicyOption | undefined
-      const api = createFakeApi(scratch, [], {
-        select(title, options) {
-          if (title === "Configuration scope") {
-            scopeVisits += 1
-            return scopeVisits === 1 ? option(options, "project") : "escape"
-          }
-          if (title === "Agents") {
-            activeInfo = options.find((candidate) => candidate.value === "__active_preset_info__")
-            return "escape"
-          }
-          throw new Error(`unexpected select dialog: ${title}`)
-        },
-        confirm() {
-          return true
-        },
-      })
-
-      // When the agent hub opens
-      await runModelConfigurator(api, scratch.profiles)
-
-      // Then the active name and its synchronization state are visible
-      assert.equal(activeInfo?.title, "Active preset: tracked")
-      assert.match(activeInfo?.description ?? "", scenario.status)
-    } finally {
-      await rm(scratch.root, { recursive: true, force: true })
-    }
-  }
-  pass("shouldShowWhetherActivePresetMatchesCurrentConfiguration")
-}
-
-async function shouldDeleteActivePresetAndSidecarWithoutTouchingConfig(): Promise<void> {
+async function shouldDeletePresetWithoutTouchingConfig(): Promise<void> {
   const scratch = await createWizardFixture()
   try {
     // Given a seeded preset and an untouched config
@@ -1971,8 +1752,6 @@ async function shouldDeleteActivePresetAndSidecarWithoutTouchingConfig(): Promis
       savedAt: "2026-01-01T00:00:00.000Z",
       assignments: { alpha: { model: "openai/new", variant: "high" } },
     })
-    const activePath = path.join(path.dirname(configFile), ACTIVE_PRESET_FILE)
-    await saveActivePreset(activePath, "saved")
     const toasts: TuiToast[] = []
     let scopeVisits = 0
     let hubVisits = 0
@@ -1997,12 +1776,11 @@ async function shouldDeleteActivePresetAndSidecarWithoutTouchingConfig(): Promis
     // When: apply project, delete the preset, esc back through the hub and scope dialogs to exit
     await runModelConfigurator(api, scratch.profiles)
 
-    // Then the preset and active identity are gone while the config is untouched
+    // Then the preset is gone while the configuration is untouched
     assert.deepEqual(await loadPresets(presetsPath), [])
-    assert.equal(await loadActivePreset(activePath), undefined)
     assert.equal(await readFile(configFile, "utf8"), original)
     assert.ok(toasts.some((toast) => toast.message?.includes('Deleted preset "saved"')))
-    pass("shouldDeleteActivePresetAndSidecarWithoutTouchingConfig")
+    pass("shouldDeletePresetWithoutTouchingConfig")
   } finally {
     await rm(scratch.root, { recursive: true, force: true })
   }
@@ -2057,7 +1835,6 @@ async function shouldBlockApplyAndReportPresetSaveFailureWhenStorageBecomesInval
       alpha: { model: "openai/old", variant: undefined },
       beta: { model: "anthropic/old", variant: undefined },
     })
-    assert.equal((await readdir(path.dirname(configFile))).includes("models-presets-active.json"), false)
     assert.deepEqual(await readFile(presetsPath), Buffer.from(CORRUPTED_PRESET_BYTES))
     pass("shouldBlockApplyAndReportPresetSaveFailureWhenStorageBecomesInvalid")
   } finally {
@@ -2758,85 +2535,6 @@ async function shouldRoundTripAndOverwritePresetsWhenSaved(): Promise<void> {
   }
 }
 
-async function shouldRoundTripAndClearActivePresetStateWhenSaved(): Promise<void> {
-  const scratch = await mkdtemp(path.join(tmpdir(), "models-presets-active."))
-  try {
-    // Given a resolved OpenCode configuration path
-    const configFile = path.join(scratch, ".opencode", "opencode.jsonc")
-    const file = activePresetFile(configFile)
-
-    // When the active preset is saved, replaced, and cleared
-    await saveActivePreset(file, "first")
-    const first = {
-      path: file,
-      value: await loadActivePreset(file),
-      bytes: await readFile(file, "utf8"),
-      mode: (await stat(file)).mode & 0o777,
-    }
-    await saveActivePreset(file, "second")
-    const second = {
-      value: await loadActivePreset(file),
-      entries: (await readdir(path.dirname(file))).sort(),
-    }
-    await clearActivePreset(file)
-    await clearActivePreset(file)
-
-    // Then the strict v1 document is atomic, private, and idempotently removable
-    assert.deepEqual(first, {
-      path: path.join(scratch, ".opencode", ACTIVE_PRESET_FILE),
-      value: "first",
-      bytes: '{\n  "version": 1,\n  "activePreset": "first"\n}\n',
-      mode: 0o600,
-    })
-    assert.deepEqual(second, { value: "second", entries: [ACTIVE_PRESET_FILE] })
-    assert.equal(await loadActivePreset(file), undefined)
-    pass("shouldRoundTripAndClearActivePresetStateWhenSaved")
-  } finally {
-    await rm(scratch, { recursive: true, force: true })
-  }
-}
-
-async function shouldRejectInvalidActivePresetStateWithoutOverwritingIt(): Promise<void> {
-  const scratch = await mkdtemp(path.join(tmpdir(), "models-presets-active-invalid."))
-  try {
-    // Given strict-invalid active preset documents
-    const file = path.join(scratch, ACTIVE_PRESET_FILE)
-    const invalidCases: Array<{ content: string; reason: RegExp }> = [
-      { content: "{", reason: /malformed JSON/ },
-      { content: "[]", reason: /root must be an object/ },
-      { content: '{"version":1,"activePreset":"x","extra":true}', reason: /unknown field 'extra'/ },
-      { content: '{"version":1,"activePreset":"x","constructor":true}', reason: /forbidden key 'constructor'/ },
-      { content: '{"activePreset":"x"}', reason: /version is missing/ },
-      { content: '{"version":2,"activePreset":"x"}', reason: /unsupported version 2/ },
-      { content: '{"version":1}', reason: /activePreset must be a non-empty string/ },
-      { content: '{"version":1,"activePreset":""}', reason: /activePreset must be a non-empty string/ },
-    ]
-
-    for (const invalidCase of invalidCases) {
-      // When / Then loading rejects each invalid shape with its file path
-      await writeFile(file, invalidCase.content)
-      await assert.rejects(
-        () => loadActivePreset(file),
-        (error: unknown) => {
-          assert.ok(error instanceof Error)
-          assert.ok(error.message.includes(file))
-          assert.match(error.message, invalidCase.reason)
-          return true
-        },
-      )
-    }
-
-    // And mutation refuses to replace corrupted state
-    const corrupted = Buffer.from("not json\n")
-    await writeFile(file, corrupted)
-    await assert.rejects(() => saveActivePreset(file, "replacement"), /malformed JSON/)
-    assert.deepEqual(await readFile(file), corrupted)
-    pass("shouldRejectInvalidActivePresetStateWithoutOverwritingIt")
-  } finally {
-    await rm(scratch, { recursive: true, force: true })
-  }
-}
-
 async function shouldRejectEveryInvalidPresetStorageShapeWhenLoaded(): Promise<void> {
   const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-presets-invalid."))
   try {
@@ -3322,13 +3020,10 @@ async function shouldUpdatePresetBySelectingExistingName(): Promise<void> {
       savedAt: "2026-01-01T00:00:00.000Z",
       assignments: { alpha: { model: "openai/new", variant: "high" } },
     })
-    const activePath = path.join(path.dirname(configFile), ACTIVE_PRESET_FILE)
-    await saveActivePreset(activePath, "saved")
     const toasts: TuiToast[] = []
     let promptCalls = 0
-    let selectedCurrent: string | undefined
     const api = createFakeApi(scratch, toasts, {
-      select(title, options, current) {
+      select(title, options) {
         if (title === "Configuration scope") return option(options, "project")
         if (title === "Agents") return option(options, "default")
         if (title === "Tier: high") return option(options, "openai/new")
@@ -3336,10 +3031,7 @@ async function shouldUpdatePresetBySelectingExistingName(): Promise<void> {
         if (title === "Tier: low") return option(options, "__keep_current__")
         if (title === "Individual overrides") return option(options, "__override_no__")
         if (title.startsWith("Apply ")) return option(options, "__update_preset__")
-        if (title === "Select preset to update") {
-          selectedCurrent = current
-          return option(options, "__update_preset__:saved")
-        }
+        if (title === "Select preset to update") return option(options, "__update_preset__:saved")
         throw new Error(`unexpected select dialog: ${title}`)
       },
       confirm() {
@@ -3356,7 +3048,6 @@ async function shouldUpdatePresetBySelectingExistingName(): Promise<void> {
 
     // Then no name prompt or overwrite confirmation is used, and the preset is replaced in place
     assert.equal(promptCalls, 0)
-    assert.equal(selectedCurrent, "__update_preset__:saved")
     const persisted = await readConfigSnapshot(configFile)
     assert.deepEqual(persisted.mappings, {
       alpha: { model: "openai/new", variant: "high" },
@@ -3369,7 +3060,6 @@ async function shouldUpdatePresetBySelectingExistingName(): Promise<void> {
       alpha: { model: "openai/new", variant: "high" },
       beta: { model: "anthropic/old" },
     })
-    assert.equal(await loadActivePreset(activePath), "saved")
     pass("shouldUpdatePresetBySelectingExistingName")
   } finally {
     await rm(scratch.root, { recursive: true, force: true })
@@ -4992,23 +4682,20 @@ await shouldAggregatePersistenceFailureBeforeRecoveryConflict()
 await shouldCompleteStagedWizardAndPersistSelectedChanges()
 await shouldBlockConfigurationWriteWhenPresetStorageIsUnavailable()
 await shouldBlockConfigurationWriteWhenPresetStorageIsUnreadable()
-await shouldBlockConfigurationWriteWhenActivePresetStateIsUnavailable()
 await shouldRestorePresetStorageWhenWizardReopensAfterRepair()
 await shouldLeaveConfigUntouchedWhenFinalReviewIsCancelled()
 await shouldReloadAndRejectStaleSelectionAfterFinalApplyInteraction()
-await shouldKeepNamedPresetAndShowDriftWhenConfigurationApplyFails()
+await shouldKeepNamedPresetWhenConfigurationApplyFails()
 await shouldReshowPreviousDialogWhenEscapingBack()
 await shouldExitWithoutWritingWhenScopeIsEscaped()
-await shouldCreateNamedPresetAndActiveSidecarWhenApplying()
+await shouldCreateNamedPresetWhenApplying()
 await shouldRejectForbiddenLiveAgentAssignmentsBeforeReplacingPresetStorage()
 await shouldApplyPresetSkippingTiersAndOverrides()
 await shouldRejectPresetChangedAfterItWasSelected()
-await shouldActivateMatchingPresetWithoutRewritingConfiguration()
-await shouldRevalidateConfigurationAndCatalogBeforeNoOpActivation()
+await shouldRewriteConfigurationWhenApplyingMatchingPreset()
 await shouldPreservePresetIdentityWhenReturningToPendingReview()
 await shouldClearPresetIdentityWhenPendingDecisionsAreModified()
-await shouldShowWhetherActivePresetMatchesCurrentConfiguration()
-await shouldDeleteActivePresetAndSidecarWithoutTouchingConfig()
+await shouldDeletePresetWithoutTouchingConfig()
 await shouldBlockApplyAndReportPresetSaveFailureWhenStorageBecomesInvalid()
 await shouldClearPresetUiAndReportDeleteFailureWhenStorageBecomesInvalid()
 await shouldOpenAdjacentAgentViaNextAgent()
@@ -5025,8 +4712,6 @@ await shouldRepeatSubagentUnderEveryParentThatClaimsIt()
 await shouldExcludeInternalAgentsUntilTheyAreRevealed()
 await shouldMatchAnchoredGlobsWhenEvaluatingPermissionPatterns()
 await shouldRoundTripAndOverwritePresetsWhenSaved()
-await shouldRoundTripAndClearActivePresetStateWhenSaved()
-await shouldRejectInvalidActivePresetStateWithoutOverwritingIt()
 await shouldRejectEveryInvalidPresetStorageShapeWhenLoaded()
 await shouldRejectInheritedPresetFieldsAndIgnoreInheritedOptionalValues()
 await shouldLoadOnlyMissingPresetStorageAsEmptyWhenReadFailsOtherwise()
