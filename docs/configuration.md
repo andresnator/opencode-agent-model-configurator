@@ -49,6 +49,16 @@ Profiles are optional input. Presets are named saved results. The plugin never w
 
 Set `profilesDir` in the plugin options in `tui.json`.
 
+```json
+{
+  "plugin": [
+    ["opencode-models-presets", {"profilesDir": ".opencode/model-profiles"}]
+  ]
+}
+```
+
+The first tuple value remains the npm package spec. It may include an exact version, such as `opencode-models-presets@0.3.1`. Keep the options object when changing that version.
+
 | Value | Resolution |
 | --- | --- |
 | Relative path | From the active project directory |

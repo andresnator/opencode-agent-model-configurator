@@ -1,12 +1,8 @@
 # Contributing
 
-## Quick path
+Use Node.js `22.23.2` and pnpm `10.34.5`.
 
-1. Use Node.js `22.23.2` and pnpm `10.34.5`.
-2. Install locked dependencies.
-3. Make one focused change and add contract coverage for changed behavior.
-4. Run the complete and security checks.
-5. Open a pull request with evidence.
+## Quick path
 
 ```bash
 pnpm install --frozen-lockfile
@@ -14,67 +10,28 @@ pnpm run check
 pnpm run security:check
 ```
 
-## Set up the repository
+Make one focused change, update its tests and documentation, then run both checks before opening a pull request. Do not rewrite `pnpm-lock.yaml` with npm, Yarn, or another pnpm version.
 
-| Tool | Version |
-| --- | --- |
-| Node.js | `22.23.2`, from `.node-version` |
-| pnpm | `10.34.5`, from `packageManager` |
-| TypeScript | `5.9.3`, strict mode, ES2022 target |
+## Test locally
 
-Do not replace `pnpm-lock.yaml` or rewrite it with npm, Yarn, or another pnpm version. npm is used only to verify registry signatures.
+Register the current repository instead of the npm package:
 
-## Test the plugin in OpenCode
+```bash
+opencode plugin "$PWD" --global --force
+```
 
-From the checkout under test, follow [Load a development checkout](README.md#load-a-development-checkout). Keep the checkout at its registered path and restart OpenCode before manual testing.
+Keep the repository at that path, restart OpenCode, and test **Configure model presets** or `/models-profiles`.
 
-## Keep changes focused
+## Keep the change focused
 
-- Keep behavior independent of specific providers and agent harnesses.
-- Support the OpenCode range in `package.json`.
-- Do not add provider IDs, model IDs, agent names, or configuration paths as product defaults.
-- Use obvious placeholders in examples.
+- Keep behavior independent of providers, model IDs, and agent names.
 - Keep public documentation in English.
-- Update tests, schemas, examples, and docs when their shared behavior changes.
-
-For OpenCode API changes, check the current upstream TUI plugin specification. Change `engines.opencode` only with runtime evidence.
-
-## Write contract tests
-
-Put observable behavior tests in `tests/contracts.ts`.
-
-- Import assertions from `node:assert/strict`.
-- Name tests `should...When...`.
-- Use visible `// Given`, `// When`, and `// Then` sections in non-trivial tests.
-
-## Find your way around
-
-| Path | Contents |
-| --- | --- |
-| `src/` | Plugin entry point, wizard, persistence, presets, and live apply |
-| `tests/contracts.ts` | Behavioral contracts |
-| `scripts/` | Build, installation, and package checks |
-| `schemas/` | Profile JSON Schema |
-| `examples/` | Profile examples |
-| `docs/` | Configuration and troubleshooting |
-| `.github/` | CI, issue form, and pull request template |
-
-## Verify the change
-
-`pnpm run check` runs type checking, contract tests, workflow pin checks, the build, and package verification.
-
-`pnpm run security:check` rejects known vulnerabilities at `low` severity or higher and verifies dependency registry signatures. Review and update the lockfile instead of using an automatic audit fix.
-
-Record focused manual checks separately in the pull request.
+- Put behavior contracts in `tests/contracts.ts`.
+- Name tests `should...When...` and use `// Given`, `// When`, and `// Then` in non-trivial cases.
+- Update schemas and examples when their shared contract changes.
 
 ## Open the pull request
 
-- Use `type(scope)!: description` for the title. The scope and `!` are optional.
-- Use one of these types: `build`, `chore`, `ci`, `deps`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`, `style`, or `test`.
-- Explain the change, public impact, verification evidence, and documentation effect.
-- Include a `BREAKING CHANGE:` footer when needed.
-- Keep secrets, private paths, temporary files, and local-only data out of the diff.
+Use `type(scope)!: description`; `scope` and `!` are optional. Supported types are `build`, `chore`, `ci`, `deps`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`, `style`, and `test`.
 
-`feat`, `fix`, and `deps` normally propose a release. Before `1.0.0`, they produce a patch release. Breaking changes produce a minor release. Other types do not produce a release unless they are breaking.
-
-After a qualifying change reaches `main`, Release Please opens or updates a release pull request. Merging it updates `package.json` and `CHANGELOG.md`, creates a `vX.Y.Z` tag, and publishes a GitHub Release. It does not publish to npm.
+Describe the change and list automated and manual verification. `feat`, `fix`, and `deps` changes normally create a release through Release Please. Stable releases are published to npm by `.github/workflows/publish.yml` through Trusted Publishing; no npm token belongs in the repository.

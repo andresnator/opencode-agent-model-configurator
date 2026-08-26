@@ -4,7 +4,7 @@ Find the symptom you can see and follow its first action.
 
 | Symptom | First action |
 | --- | --- |
-| Plugin or command is missing | Check the registered path, then restart OpenCode |
+| Plugin or command is missing | Check the npm entry in `tui.json`, then restart OpenCode |
 | Agent, provider, model, or variant is missing | Refresh the live OpenCode catalog |
 | Profile or preset is missing | Read the warning before editing stored data |
 | Configuration changed or cannot be written | Keep the current file, fix the cause, and reopen the plugin |
@@ -15,12 +15,20 @@ Normal behavior is described in [Configuration](configuration.md).
 ## The plugin does not load
 
 1. Open the `tui.json` used by OpenCode.
-2. Confirm that the plugin entry points to the checkout's current absolute path.
-3. If the checkout moved, restore it or remove the old registration before registering the new path.
+2. Confirm that exactly one string or tuple uses the npm spec `opencode-models-presets` or `opencode-models-presets@<version>`.
+3. If the entry pins a version, confirm that the release exists and supports your OpenCode version.
 4. Restart OpenCode and try **Configure model presets** or `/models-profiles`.
-5. If the checkout is missing or damaged, repeat the [installation](../README.md#quick-start).
+5. If the entry is absent or invalid, repeat the [installation](../README.md#quick-start).
 
 The README is the only source for installation commands.
+
+## Update the plugin
+
+- For normal updates, keep the bare `"opencode-models-presets"` entry and restart OpenCode. Bare npm specs follow `latest` and can refresh when the cached package is stale.
+- For a pinned install, change only the version in the matching `tui.json` entry, for example from `opencode-models-presets@0.3.1` to a newer stable release.
+- If the entry is a tuple, preserve its options object.
+
+Do not edit unrelated entries or use `npm install -g`.
 
 ## OpenCode says paths are still syncing
 
@@ -89,13 +97,12 @@ First remove the registration:
 
 1. Close OpenCode sessions that use the plugin.
 2. Open `tui.json`.
-3. Remove only the plugin entry that points to this checkout.
+3. Remove only the string or tuple whose npm spec is `opencode-models-presets` or `opencode-models-presets@<version>`.
 4. Keep every other plugin entry and option.
 5. Restart OpenCode and confirm that the Models Presets entry points are gone.
 
 Then choose only the cleanup you need:
 
-- Delete the checkout only after removing its registration.
 - Delete `model-configurator-presets.json` only if you want to remove every saved preset.
 - Remove only known Models Presets assignments from project or global OpenCode configuration. The files do not record who created each assignment.
 - Keep or delete your profile files separately. The plugin does not own them.

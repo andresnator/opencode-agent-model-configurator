@@ -1,64 +1,54 @@
 # OpenCode Models Presets
 
-Assign models and variants to OpenCode agents without editing configuration files by hand. Save those choices as named presets and reuse them later.
+Assign models and variants to OpenCode agents, review the changes, and save reusable presets. The plugin uses the live agents and models from your OpenCode server instead of a hardcoded catalog.
 
-The plugin reads agents, providers, models, and variants from your running OpenCode server. It does not use a hardcoded catalog.
+## Install
 
-## Quick start
-
-You need `curl`, Git, and OpenCode `>=1.17.15 <2`. The plugin is not published on npm.
-
-Install the latest release:
+Requires OpenCode `>=1.17.15 <2`.
 
 ```bash
-curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/andresnator/opencode-agent-model-configurator/main/scripts/install.sh -o /tmp/opencode-models-presets-install.sh && sh /tmp/opencode-models-presets-install.sh latest
+opencode plugin opencode-models-presets --global
 ```
 
-Then:
+Restart OpenCode, then press `Ctrl+P` and choose **Configure model presets**, or run `/models-profiles`.
 
-1. Keep `/tmp/opencode-models-presets` in place. OpenCode loads the plugin from that path.
-2. Restart OpenCode.
-3. Press `Ctrl+P` and choose **Configure model presets**, or run `/models-profiles`.
-
-If your system clears `/tmp`, run the installer again. To use a permanent location, set `MODELS_PRESETS_INSTALL_DIR` to an absolute path before installing.
-
-To install a specific release, replace `latest` with a tag such as `v0.3.0`.
-
-## Use the plugin
+## Use
 
 1. Choose project or global scope.
 2. Start from live agents, an optional profile, or a saved preset.
-3. Keep, replace, or inherit each agent assignment.
-4. Review every change.
-5. Create a named preset or update an existing one, then apply it.
-6. Restart affected OpenCode sessions if the completion message asks you to.
+3. Keep, replace, or inherit assignments.
+4. Review and apply the changes.
 
-See [Configuration](docs/configuration.md) for scopes, profiles, presets, files, and write safety.
+See [Configuration](docs/configuration.md) for profiles, presets, storage, and write safety.
 
-## Load a development checkout
+## Configure options
 
-From the repository root, run:
+Options live beside the npm package spec in `tui.json`:
 
-```bash
-opencode plugin "$PWD" --global --force
+```json
+{
+  "plugin": [
+    ["opencode-models-presets", {"profilesDir": ".opencode/model-profiles"}]
+  ]
+}
 ```
 
-Keep the checkout at the registered path, then restart OpenCode. This command registers the current checkout without changing its revision.
+Relative profile paths resolve from the active project.
 
-## Compatibility
+## Update or remove
 
-| Item | Support |
-| --- | --- |
-| OpenCode | `>=1.17.15 <2` |
-| Agents | Primary agents and subagents exposed by OpenCode |
-| Models | Connected providers and their live model catalogs |
-| Scope | Project or global configuration |
+Keep `"opencode-models-presets"` to follow `latest`. To pin a release, use `"opencode-models-presets@<version>"`.
 
-## Help and project information
+To remove the plugin, delete only its matching string or tuple from the global `tui.json`, preserve every other entry, and restart OpenCode. There is no global npm installation to uninstall.
+
+## Develop
+
+See [Contributing](CONTRIBUTING.md) to load local source and run checks.
+
+## Help
 
 - [Troubleshooting](docs/troubleshooting.md)
-- [Contributing](CONTRIBUTING.md)
-- [Report a non-security problem](https://github.com/andresnator/opencode-agent-model-configurator/issues)
-- [Report a security vulnerability](SECURITY.md)
+- [Report a problem](https://github.com/andresnator/opencode-agent-model-configurator/issues)
+- [Security policy](SECURITY.md)
 - [Changelog](CHANGELOG.md)
 - [MIT License](LICENSE)
