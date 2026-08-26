@@ -2,6 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://raw.githubusercontent.com/andresnator/opencode-agent-model-configurator/main/schemas/profile.schema.json",
   "title": "OpenCode Models Presets profile",
+  "description": "Groups OpenCode agents into reusable model-selection tiers.",
   "type": "object",
   "required": ["tiers"],
   "properties": {
@@ -9,25 +10,32 @@
       "type": "string"
     },
     "name": {
-      "type": "string"
+      "type": "string",
+      "description": "Name shown in Models Presets."
     },
     "description": {
-      "type": "string"
+      "type": "string",
+      "description": "Short explanation shown with the profile."
     },
     "tiers": {
       "type": "object",
+      "description": "Named groups of agents that share an initial model decision.",
       "additionalProperties": {
         "type": "object",
+        "description": "One named agent group.",
         "required": ["agents"],
         "properties": {
           "description": {
-            "type": "string"
+            "type": "string",
+            "description": "Short explanation shown with the tier."
           },
           "variant": {
-            "type": ["string", "null"]
+            "type": ["string", "null"],
+            "description": "Initial variant for the tier, or null for the provider default."
           },
           "agents": {
             "type": "array",
+            "description": "Agent names exposed by the running OpenCode server.",
             "items": {
               "type": "string",
               "minLength": 1
