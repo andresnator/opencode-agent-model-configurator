@@ -3479,7 +3479,7 @@ function errorMessage(error) {
 // src/tui.tsx
 var MODELS_PRESETS_PLUGIN_ID = "models-presets";
 var MODELS_PRESETS_COMMAND_ID = "models-presets.open";
-var MODELS_PRESETS_SLASH_NAME = "models-presets";
+var MODELS_PRESETS_SLASH_NAME = "models-profiles";
 var MINIMUM_OPENCODE_VERSION = "1.17.15";
 var tui = async (api, rawOptions) => {
   const options = normalizePluginOptions(rawOptions);

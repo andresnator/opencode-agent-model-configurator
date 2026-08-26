@@ -12,7 +12,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/andresna
 
 `latest` resolves to the highest published `vX.Y.Z` release tag. The installer clones or updates that release at `/tmp/opencode-models-presets`, then registers the retained path globally with OpenCode. To install a specific release, replace `latest` with its published tag; older releases retain the names and commands documented in that release. Set `MODELS_PRESETS_INSTALL_DIR` to an absolute path before running the command if `/tmp/opencode-models-presets` is not suitable.
 
-Keep the cloned directory in place because OpenCode records its path in `tui.json`. If the operating system clears `/tmp`, rerun the command. Restart OpenCode, press `Ctrl+P`, and confirm that **models-presets** is active; then choose **Configure model presets** or run `/models-presets`.
+Keep the cloned directory in place because OpenCode records its path in `tui.json`. If the operating system clears `/tmp`, rerun the command. Restart OpenCode, press `Ctrl+P`, and confirm that **models-presets** is active; then choose **Configure model presets** or run `/models-profiles`.
 
 ### Load an existing checkout
 
@@ -22,7 +22,7 @@ To exercise code already checked out for development, start at that checkout's r
 opencode plugin "$PWD" --global --force
 ```
 
-Keep the checkout at that path, restart OpenCode, and use **Configure model presets** or `/models-presets`. This route does not clone or switch the checkout revision.
+Keep the checkout at that path, restart OpenCode, and use **Configure model presets** or `/models-profiles`. This route does not clone or switch the checkout revision.
 
 ## Configuration flow
 

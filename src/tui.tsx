@@ -5,7 +5,7 @@ import { runModelConfigurator } from "./wizard"
 
 export const MODELS_PRESETS_PLUGIN_ID = "models-presets"
 export const MODELS_PRESETS_COMMAND_ID = "models-presets.open"
-export const MODELS_PRESETS_SLASH_NAME = "models-presets"
+export const MODELS_PRESETS_SLASH_NAME = "models-profiles"
 export const MINIMUM_OPENCODE_VERSION = "1.17.15"
 
 const tui: TuiPlugin = async (api, rawOptions) => {

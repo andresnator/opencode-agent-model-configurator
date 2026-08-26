@@ -130,7 +130,7 @@ async function shouldRegisterModelsPresetsNamesWhenTuiLoads(): Promise<void> {
     slashName: MODELS_PRESETS_SLASH_NAME,
   })
   assert.equal(MODELS_PRESETS_COMMAND_ID, "models-presets.open")
-  assert.equal(MODELS_PRESETS_SLASH_NAME, "models-presets")
+  assert.equal(MODELS_PRESETS_SLASH_NAME, "models-profiles")
   pass("shouldRegisterModelsPresetsNamesWhenTuiLoads")
 }
 

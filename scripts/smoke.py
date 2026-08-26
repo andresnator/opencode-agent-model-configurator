@@ -57,7 +57,7 @@ def main() -> int:
             rendered = visible(output)
             elapsed = time.monotonic() - started
             if not typed and elapsed >= 8:
-                os.write(descriptor, b"/models-presets")
+                os.write(descriptor, b"/models-profiles")
                 typed = True
             if typed and not submitted and elapsed >= 10:
                 os.write(descriptor, b"\r")
