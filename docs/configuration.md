@@ -1,6 +1,6 @@
 # Configure agent models safely
 
-Choose a scope, review the complete change set, and apply it. Models Presets writes only the selected agent assignments and reports whether the current OpenCode server applied them live. For a failure, go to [Troubleshoot by symptom](troubleshooting.md#troubleshoot-by-symptom).
+Choose a scope, review the complete change set, and apply it under a preset name. Models Presets writes only the selected agent assignments and reports whether the current OpenCode server applied them live. For a failure, go to [Troubleshoot by symptom](troubleshooting.md#troubleshoot-by-symptom).
 
 ## Choose a scope and destination
 
@@ -48,6 +48,15 @@ Start from the [published profile example](../examples/profiles/team.example.jso
 
 Presets store concrete agent, model, and optional variant assignments in `model-configurator-presets.json` under the effective global OpenCode configuration directory. They are separate from profiles and can be selected after either scope is chosen.
 
+Every assignment write has a preset identity. After configuring agents or using a profile, the review offers two actions:
+
+- **Create new preset** prompts for a new, non-empty name. An existing name must be chosen through the update flow.
+- **Update existing preset** opens the saved preset list and replaces the selected entry without asking you to type its name again.
+
+Immediately before replacing a selected preset, the plugin reloads the global store and verifies that the selected record still exists unchanged. If another configurator updated or deleted it, the write stops and the newer storage is preserved.
+
+Starting from a saved preset instead shows **Apply preset "name"**. The normal configuration write still runs when that preset already matches every live concrete assignment; the plugin does not persist or infer an active preset.
+
 Before applying a preset, the plugin checks its assignments against the live agents, connected providers, models, and variants. It identifies stale entries and skips them before applying any valid remainder. It does not silently delete the saved preset.
 
 Immediately before the final write, the plugin reloads the model catalog. If a pending model or variant has become stale, it stops without writing and asks you to reopen Models Presets and select again. For storage or stale-entry recovery, see [A preset cannot be loaded or applied](troubleshooting.md#a-preset-cannot-be-loaded-or-applied).
@@ -71,11 +80,12 @@ Models Presets writes model identifiers and variants; it never writes provider c
 
 ### Assignment write guarantees
 
-Assignment configuration writes are atomic and protected against concurrent edits:
+Named apply and assignment writes follow this order:
 
-1. Before writing, the plugin compares the destination with the snapshot opened by the wizard. If the file changed or appeared in the meantime, it aborts instead of overwriting newer content.
-2. It writes and flushes a temporary file, atomically replaces the destination, preserves the destination mode, and validates the persisted content.
-3. If persistence fails after the transaction starts, recovery restores the previous content or removes a destination created by the failed attempt.
+1. The plugin reloads the live model catalog. When creating or updating a preset, it replaces the global preset store atomically; if that write fails, it does not write `opencode.json(c)`.
+2. Before writing the assignment destination, it compares it with the snapshot opened by the wizard. If the file changed or appeared in the meantime, it aborts instead of overwriting newer content.
+3. It writes and flushes a temporary file, atomically replaces the destination, preserves the destination mode, and validates the persisted content.
+4. If assignment persistence fails after its transaction starts, recovery restores the previous configuration content or removes a destination created by the failed attempt. A preset saved before that failure remains available for a later retry.
 
 Use the focused recovery steps for [a concurrent change](troubleshooting.md#the-configuration-changed-while-the-wizard-was-open) or [a write failure](troubleshooting.md#the-configuration-cannot-be-written).
 
@@ -87,6 +97,7 @@ The completion message distinguishes a successful write from live application:
 | --- | --- |
 | Applied live | The current OpenCode server has the assignments. Restart any other running OpenCode processes. |
 | Restart required | The file was written, but the applicable reload route was unavailable, rejected the update, or could not apply a global removal-only change. Restart the affected OpenCode sessions. |
+| Preset saved, configuration not applied | The named preset remains saved. Resolve the reported configuration failure, reopen, and retry. |
 | Error before completion | Do not assume a write succeeded. Follow the reported path and the matching recovery symptom. |
 
 See [Changes were written but are not active](troubleshooting.md#changes-were-written-but-are-not-active) for restart recovery.

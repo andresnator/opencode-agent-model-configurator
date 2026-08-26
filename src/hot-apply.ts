@@ -26,6 +26,10 @@ export type ApplyOutcome = {
   detail?: string
 }
 
+export type ApplyOptions = {
+  forceWrite?: boolean
+}
+
 export type HotApplyResult = { applied: true } | { applied: false; reason: string }
 
 export type GlobalAgentPatch = {
@@ -64,16 +68,17 @@ export async function applyConfigChanges(
   snapshot: ConfigSnapshot,
   changes: readonly AgentChange[],
   hooks: PersistenceHooks = {},
+  options: ApplyOptions = {},
 ): Promise<ApplyOutcome> {
   if (scope === "project") {
-    const result = await writeConfigChanges(snapshot, changes, hooks)
+    const result = await writeConfigChanges(snapshot, changes, hooks, { force: options.forceWrite })
     const hot = await disposeProjectInstance(client, runtime)
     return outcome(result.file, hot)
   }
 
   const plan = planGlobalHotApply(changes)
   if (plan.strategy === "write-only") {
-    const result = await writeConfigChanges(snapshot, changes, hooks)
+    const result = await writeConfigChanges(snapshot, changes, hooks, { force: options.forceWrite })
     return { file: result.file, hotApplied: false, detail: plan.reason }
   }
 

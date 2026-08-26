@@ -92,6 +92,11 @@ type WriteContentOptions = {
   conflictMessage?: string
   expectedOwnership?: ConfigWriteOwnership
   retainOwnership?: boolean
+  forceWrite?: boolean
+}
+
+export type WriteConfigOptions = {
+  force?: boolean
 }
 
 type WriteContentResult = {
@@ -153,8 +158,9 @@ export async function writeConfigChanges(
   snapshot: ConfigSnapshot,
   changes: readonly AgentChange[],
   hooks: PersistenceHooks = {},
+  options: WriteConfigOptions = {},
 ): Promise<WriteResult> {
-  const written = await writeConfigChangesInternal(snapshot, changes, hooks)
+  const written = await writeConfigChangesInternal(snapshot, changes, hooks, { forceWrite: options.force })
   return written.result
 }
 
@@ -284,12 +290,12 @@ async function writeConfigChangesInternal(
   hooks: PersistenceHooks,
   options: WriteContentOptions = {},
 ): Promise<WriteContentResult> {
-  if (changes.length === 0) {
+  if (changes.length === 0 && !options.forceWrite) {
     await requireExpectedOwnership(snapshot, options)
     return { result: { file: snapshot.file } }
   }
   const rendered = renderConfigChanges(snapshot, changes)
-  if (rendered === snapshot.content) {
+  if (rendered === snapshot.content && !options.forceWrite) {
     await requireExpectedOwnership(snapshot, options)
     return { result: { file: snapshot.file } }
   }

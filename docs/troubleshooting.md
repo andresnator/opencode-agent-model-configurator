@@ -43,10 +43,11 @@ A missing profile directory is not a plugin-load failure. Continue by configurin
 
 ## A preset cannot be loaded or applied
 
-- **Preset storage is malformed, unreadable, or has an invalid shape:** Models Presets preserves the legacy-compatible `model-configurator-presets.json` filename, disables preset operations, and keeps core agent configuration usable. Back up and repair the file, then reopen the plugin.
+- **Preset storage is malformed, unreadable, or has an invalid shape:** Models Presets preserves the legacy-compatible `model-configurator-presets.json` filename and disables every named apply action. Back up and repair the file, then reopen the plugin; the configuration is not written without a saved preset.
 - **Some assignments are stale:** review the listed agents. Apply the valid remainder if it is still useful, then reselect live assignments and overwrite the preset when ready.
 - **Every assignment is stale:** nothing is applied. Recreate the preset from live agents, models, and variants.
 - **A final selection became stale:** reopen and reselect; the stopped flow did not write those pending changes.
+- **The selected preset changed before update:** another configurator updated or deleted it. Reopen the preset list and review the latest storage before retrying; the concurrent version was preserved.
 
 Do not delete malformed storage merely to dismiss the warning. Delete it only as the deliberate reset described in [Remove or reset the plugin deliberately](#remove-or-reset-the-plugin-deliberately). Preset storage and validation are defined in [Save presets and revalidate live data](configuration.md#save-presets-and-revalidate-live-data).
 
@@ -68,7 +69,7 @@ Preserve the newer content, close the failed flow, reopen Models Presets to load
 
 ## The configuration cannot be written
 
-Assignment writes are atomic. If persistence fails after writing starts, recovery restores the previous content or removes a destination created by the failed attempt; Models Presets does not report partial success.
+Assignment writes are atomic. If configuration persistence fails after writing starts, recovery restores the previous content or removes a destination created by the failed attempt. A newly created or updated preset may already be saved; the error reports this explicitly so it can be reused on the next attempt.
 
 1. Note the exact destination and error shown by Models Presets.
 2. Inspect the destination before editing it, and preserve any content that exists.

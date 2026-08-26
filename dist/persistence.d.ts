@@ -48,10 +48,13 @@ export type ConfigWriteOwnership = {
     readonly file: string;
     readonly [CONFIG_WRITE_OWNERSHIP]: ConfigWriteOwnershipState;
 };
+export type WriteConfigOptions = {
+    force?: boolean;
+};
 export declare function resolveConfigFile(scope: ConfigScope, runtime: RuntimePaths): Promise<string>;
 export declare function readConfigSnapshot(file: string): Promise<ConfigSnapshot>;
 export declare function renderConfigChanges(snapshot: ConfigSnapshot, changes: readonly AgentChange[]): string;
-export declare function writeConfigChanges(snapshot: ConfigSnapshot, changes: readonly AgentChange[], hooks?: PersistenceHooks): Promise<WriteResult>;
+export declare function writeConfigChanges(snapshot: ConfigSnapshot, changes: readonly AgentChange[], hooks?: PersistenceHooks, options?: WriteConfigOptions): Promise<WriteResult>;
 export declare function writeConfigChangesWithOwnership(snapshot: ConfigSnapshot, changes: readonly AgentChange[], hooks?: PersistenceHooks): Promise<ConfigWriteOwnership | undefined>;
 export declare function writeConfigChangesFromOwnership(ownership: ConfigWriteOwnership, changes: readonly AgentChange[], hooks?: PersistenceHooks): Promise<WriteResult>;
 export declare function releaseConfigWriteOwnership(ownership: ConfigWriteOwnership): Promise<void>;

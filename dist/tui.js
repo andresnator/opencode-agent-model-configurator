@@ -1698,8 +1698,8 @@ function renderConfigChanges(snapshot, changes) {
   parseConfig(content, snapshot.file);
   return content;
 }
-async function writeConfigChanges(snapshot, changes, hooks = {}) {
-  const written = await writeConfigChangesInternal(snapshot, changes, hooks);
+async function writeConfigChanges(snapshot, changes, hooks = {}, options = {}) {
+  const written = await writeConfigChangesInternal(snapshot, changes, hooks, { forceWrite: options.force });
   return written.result;
 }
 async function writeConfigChangesWithOwnership(snapshot, changes, hooks = {}) {
@@ -1802,12 +1802,12 @@ function isConfigWriteConflictError(error) {
   return error instanceof ConfigWriteConflictError;
 }
 async function writeConfigChangesInternal(snapshot, changes, hooks, options = {}) {
-  if (changes.length === 0) {
+  if (changes.length === 0 && !options.forceWrite) {
     await requireExpectedOwnership(snapshot, options);
     return { result: { file: snapshot.file } };
   }
   const rendered = renderConfigChanges(snapshot, changes);
-  if (rendered === snapshot.content) {
+  if (rendered === snapshot.content && !options.forceWrite) {
     await requireExpectedOwnership(snapshot, options);
     return { result: { file: snapshot.file } };
   }
@@ -2343,15 +2343,15 @@ function isDirectoryNotEmpty(error) {
 }
 
 // src/hot-apply.ts
-async function applyConfigChanges(client, scope, runtime, snapshot, changes, hooks = {}) {
+async function applyConfigChanges(client, scope, runtime, snapshot, changes, hooks = {}, options = {}) {
   if (scope === "project") {
-    const result = await writeConfigChanges(snapshot, changes, hooks);
+    const result = await writeConfigChanges(snapshot, changes, hooks, { force: options.forceWrite });
     const hot = await disposeProjectInstance(client, runtime);
     return outcome(result.file, hot);
   }
   const plan = planGlobalHotApply(changes);
   if (plan.strategy === "write-only") {
-    const result = await writeConfigChanges(snapshot, changes, hooks);
+    const result = await writeConfigChanges(snapshot, changes, hooks, { force: options.forceWrite });
     return { file: result.file, hotApplied: false, detail: plan.reason };
   }
   const ownership = await writeConfigChangesWithOwnership(snapshot, plan.preludeChanges, hooks);
@@ -2473,6 +2473,8 @@ var PRESET_KEYS = ["name", "savedAt", "assignments"];
 var ASSIGNMENT_KEYS = ["model", "variant"];
 var FORBIDDEN_KEYS = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
 var FATAL_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+var PresetConflictError = class extends Error {
+};
 function presetsFile(runtime) {
   return path3.join(globalConfigRoot(runtime), PRESETS_FILE);
 }
@@ -2498,12 +2500,22 @@ async function loadPresets(file) {
   }
   return validatePresetDocument(parsed, file);
 }
-async function savePreset(file, preset) {
+async function savePreset(file, preset, options = {}) {
   const existing = await loadPresets(file);
+  const expected = options.expected;
+  if (expected) {
+    const current = existing.find((entry) => entry.name === expected.name);
+    if (!storedPresetsEqual(current, expected)) {
+      throw new PresetConflictError(`Preset "${expected.name}" changed while the configurator was open. Reopen and select it again.`);
+    }
+  }
   const next = existing.filter((entry) => entry.name !== preset.name);
   next.push(preset);
   next.sort((left, right) => left.name.localeCompare(right.name));
   await writePresets(file, next);
+}
+function isPresetConflictError(error) {
+  return error instanceof PresetConflictError;
 }
 async function deletePreset(file, name) {
   const existing = await loadPresets(file);
@@ -2573,6 +2585,16 @@ function validatePresetDocument(raw, file) {
     presets.push(preset);
   }
   return presets.sort((left, right) => left.name.localeCompare(right.name));
+}
+function storedPresetsEqual(left, right) {
+  if (!left || left.name !== right.name || left.savedAt !== right.savedAt) return false;
+  const leftAgents = Object.keys(left.assignments).sort();
+  const rightAgents = Object.keys(right.assignments).sort();
+  if (leftAgents.length !== rightAgents.length) return false;
+  return leftAgents.every((agent, index) => {
+    if (agent !== rightAgents[index]) return false;
+    return left.assignments[agent].model === right.assignments[agent].model && left.assignments[agent].variant === right.assignments[agent].variant;
+  });
 }
 async function syncDirectory2(directory) {
   const handle = await open2(directory, "r");
@@ -2661,14 +2683,14 @@ var NEXT_AGENT = "__next_agent__";
 var PREV_AGENT = "__prev_agent__";
 var OVERRIDE_YES = "__override_yes__";
 var OVERRIDE_NO = "__override_no__";
-var APPLY = "__apply__";
-var APPLY_SAVE = "__apply_save__";
+var APPLY_NAMED_PRESET = "__apply_named_preset__";
+var CREATE_PRESET = "__create_preset__";
+var UPDATE_PRESET = "__update_preset__";
 var CANCEL = "__cancel__";
 var APPLY_PRESET = "__apply_preset__";
 var DELETE_PRESET = "__delete_preset__";
-var OVERWRITE_PRESET = "__overwrite_preset__";
-var RENAME_PRESET = "__rename_preset__";
 var PRESET_PREFIX = "__preset__:";
+var UPDATE_PRESET_PREFIX = "__update_preset__:";
 var GROUP_PREFIX = "__group__:";
 var OTHER_GROUP = "__other_subagents__";
 var TOGGLE_HIDDEN = "__toggle_hidden__";
@@ -2718,7 +2740,15 @@ async function runModelConfigurator(api, profilesRoot) {
       return;
     }
     const models = flattenModels(catalog);
-    const state = { agents, profiles, presets, presetStorageAvailable, models, presetsPath, showHidden: false };
+    const state = {
+      agents,
+      profiles,
+      presets,
+      presetStorageAvailable,
+      models,
+      presetsPath,
+      showHidden: false
+    };
     await runSteps(api, state);
   } catch (error) {
     api.ui.toast({ variant: "error", title: "Model presets failed", message: errorMessage(error), duration: 8e3 });
@@ -2781,7 +2811,7 @@ async function runHubStep(api, state) {
       options.push({
         title: `Review ${pending} pending change${pending === 1 ? "" : "s"}`,
         value: REVIEW_CHANGES,
-        description: "Continue to the apply confirmation"
+        description: "Continue to the named apply confirmation"
       });
     }
     const sections = hubSections(state);
@@ -2811,12 +2841,10 @@ async function runHubStep(api, state) {
       });
     }
     for (const preset of state.presets) {
-      const count = Object.keys(preset.assignments).length;
-      const saved = preset.savedAt ? ` \u2014 saved ${preset.savedAt.slice(0, 10)}` : "";
       options.push({
         title: preset.name,
         value: PRESET_PREFIX + preset.name,
-        description: `${count} agent${count === 1 ? "" : "s"}${saved}`,
+        description: presetDescription(preset),
         category: "Saved presets"
       });
     }
@@ -2827,7 +2855,7 @@ async function runHubStep(api, state) {
       continue;
     }
     if (selected === REVIEW_CHANGES) {
-      state.source = { kind: "agents" };
+      if (state.source?.kind !== "preset") state.source = { kind: "agents" };
       return "next";
     }
     if (selected.startsWith(GROUP_PREFIX)) {
@@ -2900,8 +2928,7 @@ async function runGroupAgentsLoop(api, state, section) {
       const summary = agents.map((agent) => `${agent.name}: ${formatMapping(current[agent.name] ?? {})}`).join("; ");
       const decision2 = await selectDecision(api, `Configure every agent in ${section.title}`, state.models, void 0, summary);
       if (decision2 === void 0) continue;
-      if (decision2.action === "keep") for (const agent of agents) decisions.delete(agent.name);
-      else for (const agent of agents) decisions.set(agent.name, decision2);
+      for (const agent of agents) updateHubDecision(state, decisions, agent.name, decision2);
       continue;
     }
     const decision = await selectDecision(
@@ -2912,9 +2939,21 @@ async function runGroupAgentsLoop(api, state, section) {
       formatMapping(current[selected] ?? {})
     );
     if (decision === void 0) continue;
-    if (decision.action === "keep") decisions.delete(selected);
-    else decisions.set(selected, decision);
+    updateHubDecision(state, decisions, selected, decision);
   }
+}
+function updateHubDecision(state, decisions, agent, decision) {
+  const previous = decisions.get(agent);
+  const next = decision.action === "keep" ? void 0 : decision;
+  if (next) decisions.set(agent, next);
+  else decisions.delete(agent);
+  if (state.source?.kind === "preset" && !agentDecisionsEqual(previous, next)) state.source = { kind: "agents" };
+}
+function agentDecisionsEqual(left, right) {
+  if (!left || !right) return left === right;
+  if (left.action !== right.action) return false;
+  if (left.action !== "set" || right.action !== "set") return true;
+  return left.model === right.model && left.variant === right.variant;
 }
 async function handlePresetChoice(api, state, preset) {
   const count = Object.keys(preset.assignments).length;
@@ -2960,7 +2999,7 @@ async function handlePresetChoice(api, state, preset) {
   }
   state.decisions = decisions;
   state.tierDecisions = /* @__PURE__ */ new Map();
-  state.source = { kind: "preset" };
+  state.source = { kind: "preset", name: preset.name };
   return "next";
 }
 async function runTiersStep(api, state) {
@@ -3074,7 +3113,8 @@ async function runReviewStep(api, state) {
   const snapshot = state.snapshot;
   const decisions = state.decisions;
   const changes = calculateChanges(snapshot.mappings, decisions);
-  if (changes.length === 0) {
+  const sourcePresetName = state.source?.kind === "preset" ? state.source.name : void 0;
+  if (changes.length === 0 && !sourcePresetName) {
     api.ui.toast({ variant: "info", message: "No model assignment changes selected." });
     return "back";
   }
@@ -3083,18 +3123,35 @@ async function runReviewStep(api, state) {
   const rows = [...changes].sort(
     (left, right) => (categoryOf.get(left.agent) ?? "other").localeCompare(categoryOf.get(right.agent) ?? "other") || left.agent.localeCompare(right.agent)
   );
-  const title = `Apply ${changes.length} model change${changes.length === 1 ? "" : "s"}?`;
+  const namedStorageAvailable = state.presetStorageAvailable;
+  const unavailable = namedWriteUnavailableDescription(state);
+  const title = sourcePresetName ? `Apply ${changes.length} model change${changes.length === 1 ? "" : "s"} from preset "${sourcePresetName}"?` : `Apply ${changes.length} model change${changes.length === 1 ? "" : "s"} with a preset?`;
+  const actions = sourcePresetName ? [
+    {
+      title: `Apply preset "${sourcePresetName}"`,
+      value: APPLY_NAMED_PRESET,
+      description: namedStorageAvailable ? warning || void 0 : unavailable,
+      disabled: !namedStorageAvailable
+    }
+  ] : [
+    {
+      title: "Create new preset",
+      value: CREATE_PRESET,
+      description: namedStorageAvailable ? warning || void 0 : unavailable,
+      disabled: !namedStorageAvailable
+    },
+    {
+      title: "Update existing preset",
+      value: UPDATE_PRESET,
+      description: state.presets.length === 0 && namedStorageAvailable ? "No saved presets are available." : namedStorageAvailable ? warning || void 0 : unavailable,
+      disabled: !namedStorageAvailable || state.presets.length === 0
+    }
+  ];
   const choice = await select(
     api,
     title,
     [
-      { title: "Apply", value: APPLY, description: warning || void 0 },
-      {
-        title: "Apply and save as preset",
-        value: APPLY_SAVE,
-        description: state.presetStorageAvailable ? void 0 : "Repair preset storage and reopen model presets to enable saving.",
-        disabled: !state.presetStorageAvailable
-      },
+      ...actions,
       { title: "Cancel", value: CANCEL },
       ...rows.map((change) => ({
         title: change.agent,
@@ -3108,39 +3165,84 @@ async function runReviewStep(api, state) {
   );
   if (!choice) return "back";
   if (choice === CANCEL) return "done";
-  if (choice !== APPLY && choice !== APPLY_SAVE) return "back";
-  if (choice === APPLY_SAVE && !state.presetStorageAvailable) return "back";
-  let presetName;
-  if (choice === APPLY_SAVE) {
-    presetName = await promptPresetName(api, state);
+  if (sourcePresetName && choice !== APPLY_NAMED_PRESET) return "back";
+  if (!sourcePresetName && choice !== CREATE_PRESET && choice !== UPDATE_PRESET) return "back";
+  if (!namedStorageAvailable) return "back";
+  if (choice === UPDATE_PRESET && state.presets.length === 0) return "back";
+  let presetName = sourcePresetName;
+  let presetMutated = false;
+  let presetToUpdate;
+  if (!sourcePresetName && choice === CREATE_PRESET) {
+    presetName = await promptNewPresetName(api, state);
     if (presetName === void 0) return "back";
+    presetMutated = true;
+  } else if (!sourcePresetName && choice === UPDATE_PRESET) {
+    presetToUpdate = await selectPresetToUpdate(api, state);
+    if (!presetToUpdate) return "back";
+    presetName = presetToUpdate.name;
+    presetMutated = true;
   }
+  if (!presetName) return "back";
+  if (sourcePresetName && !await refreshSelectedPreset(api, state, sourcePresetName)) return "exit";
   const refreshedModels = flattenModels(await loadCatalog(api));
   const stale = findStaleSelections(decisions, refreshedModels);
   if (stale.length > 0) {
     api.ui.toast({ variant: "warning", message: `Selections changed in the live catalog: ${stale.join(", ")}. Reopen and select again.` });
     return "exit";
   }
-  const result = await applyConfigChanges(api.client, state.scope, api.state.path, snapshot, changes);
+  const assignments = resolvePresetAssignments(snapshot.mappings, changes, state.agents.map((agent) => agent.name));
+  if (presetMutated) {
+    const storedPreset = { name: presetName, savedAt: (/* @__PURE__ */ new Date()).toISOString(), assignments };
+    try {
+      await savePreset(state.presetsPath, storedPreset, { expected: presetToUpdate });
+      state.presets = [...state.presets.filter((entry) => entry.name !== presetName), storedPreset].sort(
+        (left, right) => left.name.localeCompare(right.name)
+      );
+    } catch (error) {
+      if (isPresetConflictError(error)) {
+        api.ui.toast({ variant: "warning", message: errorMessage(error) });
+        return "done";
+      }
+      state.presets = [];
+      state.presetStorageAvailable = false;
+      api.ui.toast({
+        variant: "error",
+        title: "Preset not saved",
+        message: `${errorMessage(error)} Configuration was not applied.`,
+        duration: 8e3
+      });
+      return "done";
+    }
+  }
+  let result;
+  try {
+    result = await applyConfigChanges(
+      api.client,
+      state.scope,
+      api.state.path,
+      snapshot,
+      changes,
+      {},
+      { forceWrite: sourcePresetName !== void 0 }
+    );
+  } catch (error) {
+    api.ui.toast({
+      variant: "error",
+      title: "Configuration not applied",
+      message: presetMutated ? `Preset "${presetName}" was saved, but ${errorMessage(error)}` : `Preset "${presetName}" was not applied: ${errorMessage(error)}`,
+      duration: 8e3
+    });
+    return "done";
+  }
   api.ui.toast({
     variant: "success",
     title: "Agent models updated",
-    message: result.hotApplied ? `Wrote ${result.file}. Applied live to this OpenCode server; other running OpenCode processes still need a restart.` : `Wrote ${result.file}. Restart OpenCode sessions to apply the assignments (${result.detail}).`,
+    message: result.hotApplied ? `Applied preset "${presetName}". Wrote ${result.file}. Applied live to this OpenCode server; other running OpenCode processes still need a restart.` : `Applied preset "${presetName}". Wrote ${result.file}. Restart OpenCode sessions to apply the assignments (${result.detail}).`,
     duration: 8e3
   });
-  if (presetName !== void 0) {
-    try {
-      const assignments = resolvePresetAssignments(snapshot.mappings, changes, state.agents.map((agent) => agent.name));
-      await savePreset(state.presetsPath, { name: presetName, savedAt: (/* @__PURE__ */ new Date()).toISOString(), assignments });
-      api.ui.toast({ variant: "success", message: `Saved preset "${presetName}".` });
-    } catch (error) {
-      state.presetStorageAvailable = false;
-      api.ui.toast({ variant: "error", title: "Preset not saved", message: errorMessage(error), duration: 8e3 });
-    }
-  }
   return "done";
 }
-async function promptPresetName(api, state) {
+async function promptNewPresetName(api, state) {
   while (true) {
     const name = await prompt(api, "Preset name", "Name this preset");
     if (name === void 0) return void 0;
@@ -3150,19 +3252,53 @@ async function promptPresetName(api, state) {
       continue;
     }
     if (state.presets.some((entry) => entry.name === trimmed)) {
-      const choice = await select(
-        api,
-        `Overwrite preset "${trimmed}"?`,
-        [
-          { title: "Overwrite", value: OVERWRITE_PRESET, description: "Replace the saved preset" },
-          { title: "Choose another name", value: RENAME_PRESET }
-        ],
-        BACK_HINT
-      );
-      if (choice !== OVERWRITE_PRESET) continue;
+      api.ui.toast({ variant: "warning", message: `Preset "${trimmed}" already exists. Use Update existing preset.` });
+      continue;
     }
     return trimmed;
   }
+}
+async function selectPresetToUpdate(api, state) {
+  const selected = await select(
+    api,
+    "Select preset to update",
+    state.presets.map((preset) => ({
+      title: preset.name,
+      value: UPDATE_PRESET_PREFIX + preset.name,
+      description: presetDescription(preset)
+    })),
+    BACK_HINT
+  );
+  if (!selected?.startsWith(UPDATE_PRESET_PREFIX)) return void 0;
+  const name = selected.slice(UPDATE_PRESET_PREFIX.length);
+  return state.presets.find((preset) => preset.name === name);
+}
+async function refreshSelectedPreset(api, state, name) {
+  let latest;
+  try {
+    latest = await loadPresets(state.presetsPath);
+  } catch (error) {
+    state.presets = [];
+    state.presetStorageAvailable = false;
+    api.ui.toast({
+      variant: "error",
+      title: "Preset unavailable",
+      message: `${errorMessage(error)} Configuration was not applied.`,
+      duration: 8e3
+    });
+    return void 0;
+  }
+  const selected = state.presets.find((preset) => preset.name === name);
+  const refreshed = latest.find((preset) => preset.name === name);
+  if (!selected || !refreshed || !assignmentRecordsEqual(selected.assignments, refreshed.assignments)) {
+    api.ui.toast({
+      variant: "warning",
+      message: `Preset "${name}" changed while the configurator was open. Reopen and select it again.`
+    });
+    return void 0;
+  }
+  state.presets = latest;
+  return refreshed;
 }
 function resolvePresetAssignments(current, changes, knownAgents) {
   const known = new Set(knownAgents);
@@ -3174,6 +3310,24 @@ function resolvePresetAssignments(current, changes, knownAgents) {
     assignments[agent] = mapping.variant ? { model: mapping.model, variant: mapping.variant } : { model: mapping.model };
   }
   return assignments;
+}
+function assignmentRecordsEqual(left, right) {
+  const leftAgents = Object.keys(left).sort();
+  const rightAgents = Object.keys(right).sort();
+  if (leftAgents.length !== rightAgents.length) return false;
+  return leftAgents.every((agent, index) => {
+    if (agent !== rightAgents[index]) return false;
+    return left[agent].model === right[agent].model && left[agent].variant === right[agent].variant;
+  });
+}
+function presetDescription(preset) {
+  const count = Object.keys(preset.assignments).length;
+  const saved = preset.savedAt ? ` \u2014 saved ${preset.savedAt.slice(0, 10)}` : "";
+  return `${count} agent${count === 1 ? "" : "s"}${saved}`;
+}
+function namedWriteUnavailableDescription(state) {
+  if (!state.presetStorageAvailable) return "Repair preset storage and reopen model presets to enable named applies.";
+  return "Named apply is unavailable.";
 }
 async function selectDecision(api, title, models, suggestedVariant, currentSummary) {
   while (true) {
