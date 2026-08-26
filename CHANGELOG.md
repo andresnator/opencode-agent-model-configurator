@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.3.0](https://github.com/andresnator/opencode-agent-model-configurator/compare/v0.2.1...v0.3.0) (2026-08-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* rename slash command to models-profiles ([#16](https://github.com/andresnator/opencode-agent-model-configurator/issues/16))
+
+### Features
+
+* rename slash command to models-profiles ([#16](https://github.com/andresnator/opencode-agent-model-configurator/issues/16)) ([133b4fc](https://github.com/andresnator/opencode-agent-model-configurator/commit/133b4fc6e6d1270ef90cf655fcf64fc74c967f2c))
+* require named presets for model configurations ([#14](https://github.com/andresnator/opencode-agent-model-configurator/issues/14)) ([a79ce63](https://github.com/andresnator/opencode-agent-model-configurator/commit/a79ce63d6bddcbf5fc22a85b467bdaa50f3cc068))
+
 ## [0.2.1](https://github.com/andresnator/opencode-agent-model-configurator/compare/v0.2.0...v0.2.1) (2026-08-25)
 
 
