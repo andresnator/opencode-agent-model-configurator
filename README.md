@@ -10,6 +10,12 @@ Requires OpenCode `>=1.17.15 <2`.
 opencode plugin opencode-models-presets --global
 ```
 
+To pin the first automated npm release:
+
+```bash
+opencode plugin opencode-models-presets@0.3.1 --global --force
+```
+
 Restart OpenCode, then press `Ctrl+P` and choose **Configure model presets**, or run `/models-profiles`.
 
 ## Use
