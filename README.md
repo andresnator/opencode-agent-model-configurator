@@ -1,5 +1,7 @@
 # OpenCode Models Presets
 
+[![npm version](https://img.shields.io/npm/v/opencode-models-presets?logo=npm&label=npm)](https://www.npmjs.com/package/opencode-models-presets)
+
 Assign models and variants to OpenCode agents, review the changes, and save reusable presets. The plugin uses the live agents and models from your OpenCode server instead of a hardcoded catalog.
 
 ## Install
