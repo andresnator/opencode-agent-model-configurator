@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/andresnator/opencode-agent-model-configurator/compare/v0.3.0...v0.3.1) (2026-08-26)
+
+
+### Bug Fixes
+
+* publish models presets through npm ([#18](https://github.com/andresnator/opencode-agent-model-configurator/issues/18)) ([cd19f4f](https://github.com/andresnator/opencode-agent-model-configurator/commit/cd19f4fd5480d66451f396f87d9f34fdba0bdc0f))
+
 ## [0.3.0](https://github.com/andresnator/opencode-agent-model-configurator/compare/v0.2.1...v0.3.0) (2026-08-26)
 
 
