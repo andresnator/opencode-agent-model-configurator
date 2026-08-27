@@ -40,14 +40,14 @@
     "opencode": ">=1.17.15 <2"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "1.18.18",
-    "@opentui/core": "0.5.3",
-    "@opentui/keymap": "0.5.3",
-    "@opentui/solid": "0.5.3",
+    "@opencode-ai/plugin": "1.18.21",
+    "@opentui/core": "0.5.7",
+    "@opentui/keymap": "0.5.7",
+    "@opentui/solid": "0.5.7",
     "@types/node": "26.2.0",
     "esbuild": "0.28.2",
     "jsonc-parser": "3.3.1",
-    "solid-js": "1.9.14",
+    "solid-js": "1.9.15",
     "tsx": "4.23.12",
     "typescript": "5.9.3"
   },
