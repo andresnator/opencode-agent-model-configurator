@@ -1010,7 +1010,7 @@ async function shouldBlockConfigurationWriteWhenPresetStorageIsUnavailable(): Pr
     await runModelConfigurator(api, scratch.profiles)
 
     // Then every named apply action is disabled and the configuration remains untouched
-    assert.equal(hubOptions.some((candidate) => candidate.category === "Saved presets"), false)
+    assert.equal(hubOptions.some((candidate) => candidate.category?.startsWith("Saved presets")), false)
     const createOption = reviewOptions.find((candidate) => candidate.value === "__create_preset__")
     const updateOption = reviewOptions.find((candidate) => candidate.value === "__update_preset__")
     assert.equal(createOption?.disabled, true)
@@ -1064,7 +1064,7 @@ async function shouldBlockConfigurationWriteWhenPresetStorageIsUnreadable(): Pro
     await runModelConfigurator(api, scratch.profiles)
 
     // Then unreadable preset storage blocks every named apply action
-    assert.equal(hubOptions.some((candidate) => candidate.category === "Saved presets"), false)
+    assert.equal(hubOptions.some((candidate) => candidate.category?.startsWith("Saved presets")), false)
     const createOption = reviewOptions.find((candidate) => candidate.value === "__create_preset__")
     const updateOption = reviewOptions.find((candidate) => candidate.value === "__update_preset__")
     assert.equal(createOption?.disabled, true)
@@ -1124,7 +1124,7 @@ async function shouldRestorePresetStorageWhenWizardReopensAfterRepair(): Promise
     await runModelConfigurator(firstApi, scratch.profiles)
 
     // Then the session-sticky gate keeps entries and mutation UI unavailable
-    assert.equal(firstSession.hubOptions.some((candidate) => candidate.category === "Saved presets"), false)
+    assert.equal(firstSession.hubOptions.some((candidate) => candidate.category?.startsWith("Saved presets")), false)
     assert.equal(firstSession.reviewOptions.find((candidate) => candidate.value === "__create_preset__")?.disabled, true)
     assert.equal(firstSession.reviewOptions.find((candidate) => candidate.value === "__update_preset__")?.disabled, true)
 
@@ -1904,7 +1904,7 @@ async function shouldClearPresetUiAndReportDeleteFailureWhenStorageBecomesInvali
     assert.equal(errors[0]?.title, "Preset not deleted")
     assert.match(errors[0]?.message ?? "", /Invalid preset storage/)
     assert.equal(toasts.some((toast) => toast.message?.includes('Deleted preset "')), false)
-    assert.equal(postDeleteHubOptions.some((candidate) => candidate.category === "Saved presets"), false)
+    assert.equal(postDeleteHubOptions.some((candidate) => candidate.category?.startsWith("Saved presets")), false)
     const saveOption = reviewOptions.find((candidate) => candidate.value === "__create_preset__")
     assert.ok(saveOption)
     assert.equal(saveOption.disabled, true)
@@ -3164,17 +3164,17 @@ async function shouldShowHistoricalPresetWhenReopenedAfterManualEdits(): Promise
     await saveLastApplied(history, configFile, "saved")
     await savePreset(presets, { name: "saved", savedAt: "", assignments: { alpha: { model: "openai/new" } } })
     await writeFile(configFile, '{"agent":{"alpha":{"model":"manual/model"}}}')
-    const observed: PolicyOption[] = []
+    const observed: Array<{ category: string | undefined; current: string | undefined }> = []
     let scopeVisits = 0
     const toasts: TuiToast[] = []
     const api = createFakeApi(scratch, toasts, {
       select(title, options, current) {
         if (title === "Configuration scope") return ++scopeVisits % 2 === 1 ? option(options, "project") : "escape"
         if (title === "Agents") {
-          observed.push(options.find((row) => row.value === "__last_applied__")!)
+          const visible = options.filter((row) => !row.disabled)
+          observed.push({ category: visible[0]?.category, current })
           const saved = options.find((row) => row.value === "__preset__:saved")
-          if (saved) assert.match(saved.description!, /^Last applied — /)
-          assert.equal(current, undefined)
+          if (saved) assert.equal(current, "__preset__:saved")
           return "escape"
         }
         throw new Error(`unexpected select dialog: ${title}`)
@@ -3191,9 +3191,9 @@ async function shouldShowHistoricalPresetWhenReopenedAfterManualEdits(): Promise
 
     // Then
     assert.deepEqual(observed, [
-      { title: "Last applied preset: saved", value: "__last_applied__", description: "Last applied by this plugin at the selected scope", disabled: true },
-      { title: "Last applied preset: saved", value: "__last_applied__", description: "No longer saved", disabled: true },
-      { title: "Last applied preset: unknown", value: "__last_applied__", description: "Last applied by this plugin at the selected scope", disabled: true },
+      { category: "Last applied preset: saved", current: "__preset__:saved" },
+      { category: "Last applied preset: saved (no longer saved)", current: undefined },
+      { category: "Last applied preset: unknown", current: undefined },
     ])
     assert.ok(toasts.some((toast) => toast.variant === "warning" && toast.message?.includes("history unavailable")))
     assert.equal(await readFile(configFile, "utf8"), '{"agent":{"alpha":{"model":"manual/model"}}}')
@@ -3222,7 +3222,7 @@ async function shouldWarnWithoutRevertingApplyWhenHistoryWriteFails(): Promise<v
         if (title === "Agents") return option(options, "__preset__:saved")
         if (title === "Preset: saved") return option(options, "__apply_preset__")
         if (title.startsWith("Apply ")) {
-          assert.equal(options.find((row) => row.value === "__last_applied__")?.title, "Last applied preset: previous")
+          assert.equal(options.filter((row) => !row.disabled)[0]?.category, "Last applied preset: previous (no longer saved)")
           return option(options, "__apply_named_preset__")
         }
         throw new Error(`unexpected select dialog: ${title}`)
@@ -3268,9 +3268,9 @@ async function shouldUpdatePresetBySelectingExistingName(): Promise<void> {
         if (title === "Individual overrides") return option(options, "__override_no__")
         if (title.startsWith("Apply ")) return option(options, "__update_preset__")
         if (title === "Select preset to update") {
-          assert.equal(options.find((row) => row.value === "__last_applied__")?.title, "Last applied preset: saved")
-          assert.match(options.find((row) => row.value === "__update_preset__:saved")!.description!, /^Last applied — /)
-          assert.equal(current, undefined)
+          const visible = options.filter((row) => !row.disabled)
+          assert.equal(visible[0]?.category, "Last applied preset: saved")
+          assert.equal(current, "__update_preset__:saved")
           return option(options, "__update_preset__:saved")
         }
         throw new Error(`unexpected select dialog: ${title}`)
