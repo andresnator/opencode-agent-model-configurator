@@ -1,9 +1,10 @@
 import assert from "node:assert/strict"
 import crypto from "node:crypto"
+import { spawnSync } from "node:child_process"
 import { writeFileSync } from "node:fs"
 import { mkdir, mkdtemp, open, readFile, readdir, rename, rm, stat, writeFile, type FileHandle } from "node:fs/promises"
 import { syncBuiltinESMExports } from "node:module"
-import { homedir, tmpdir } from "node:os"
+import { homedir, hostname, tmpdir } from "node:os"
 import path from "node:path"
 import {
   buildAgentHierarchy,
@@ -3056,6 +3057,7 @@ async function shouldPreserveHistoryWhenInvalidOrLocked(): Promise<void> {
     await saveLastApplied(history, configFile, "previous")
     const original = await readFile(history, "utf8")
     await mkdir(`${history}.lock`)
+    await writeJson(path.join(`${history}.lock`, "owner-abc.json"), { pid: process.pid, hostname: hostname() })
 
     // When
     await assert.rejects(saveLastApplied(history, configFile, "new"), { code: "EEXIST" })
@@ -3071,6 +3073,82 @@ async function shouldPreserveHistoryWhenInvalidOrLocked(): Promise<void> {
       assert.deepEqual(await readdir(scratch.global), ["model-configurator-last-applied.json"])
     }
     pass("shouldPreserveHistoryWhenInvalidOrLocked")
+  } finally {
+    await rm(scratch.root, { recursive: true, force: true })
+  }
+}
+
+async function shouldRecoverHistoryLockWhenOwnerHasExited(): Promise<void> {
+  const scratch = await createWizardFixture()
+  try {
+    // Given
+    const history = path.join(scratch.global, "model-configurator-last-applied.json")
+    const configFile = path.join(scratch.project, ".opencode", "opencode.jsonc")
+    await saveLastApplied(history, configFile, "previous")
+    const child = spawnSync(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { encoding: "utf8" })
+    assert.equal(child.status, 0)
+    const pid = Number(child.stdout)
+    assert.throws(() => process.kill(pid, 0), { code: "ESRCH" })
+    await mkdir(`${history}.lock`)
+    await writeJson(path.join(`${history}.lock`, "owner-abc.json"), { pid, hostname: hostname() })
+
+    // When
+    await saveLastApplied(history, configFile, "recovered")
+    await mkdir(`${history}.lock`)
+    await saveLastApplied(history, configFile, "legacy-recovered")
+
+    // Then
+    assert.equal(await loadLastApplied(history, configFile), "legacy-recovered")
+    assert.deepEqual(await readdir(scratch.global), ["model-configurator-last-applied.json"])
+    pass("shouldRecoverHistoryLockWhenOwnerHasExited")
+  } finally {
+    await rm(scratch.root, { recursive: true, force: true })
+  }
+}
+
+async function shouldPreserveInvalidUtf8WhenHistoryIsLoadedOrSaved(): Promise<void> {
+  const scratch = await createWizardFixture()
+  try {
+    // Given
+    const history = path.join(scratch.global, "model-configurator-last-applied.json")
+    const configFile = path.join(scratch.project, ".opencode", "opencode.jsonc")
+    const corrupt = Buffer.concat([
+      Buffer.from(`{"version":1,"lastApplied":{${JSON.stringify(configFile)}:"`),
+      Buffer.from([0xc3, 0x28]), Buffer.from('"}}'),
+    ])
+    await mkdir(scratch.global, { recursive: true })
+    await writeFile(history, corrupt)
+
+    // When
+    await assert.rejects(loadLastApplied(history, configFile), /not valid UTF-8/)
+    await assert.rejects(saveLastApplied(history, configFile, "new"), /not valid UTF-8/)
+
+    // Then
+    assert.deepEqual(await readFile(history), corrupt)
+    assert.deepEqual(await readdir(scratch.global), ["model-configurator-last-applied.json"])
+    pass("shouldPreserveInvalidUtf8WhenHistoryIsLoadedOrSaved")
+  } finally {
+    await rm(scratch.root, { recursive: true, force: true })
+  }
+}
+
+async function shouldKeepConcurrentHistoryWritesSerialized(): Promise<void> {
+  const scratch = await createWizardFixture()
+  try {
+    // Given
+    const history = path.join(scratch.global, "model-configurator-last-applied.json")
+    const files = ["one", "two", "three"].map((name) => path.join(scratch.root, name, "opencode.json"))
+
+    // When
+    const results = await Promise.allSettled(files.map((file, index) => saveLastApplied(history, file, `preset-${index}`)))
+
+    // Then
+    assert.ok(results.some((result) => result.status === "fulfilled"))
+    for (const [index, result] of results.entries()) {
+      assert.equal(await loadLastApplied(history, files[index]), result.status === "fulfilled" ? `preset-${index}` : undefined)
+    }
+    assert.deepEqual(await readdir(scratch.global), ["model-configurator-last-applied.json"])
+    pass("shouldKeepConcurrentHistoryWritesSerialized")
   } finally {
     await rm(scratch.root, { recursive: true, force: true })
   }
@@ -3133,6 +3211,7 @@ async function shouldWarnWithoutRevertingApplyWhenHistoryWriteFails(): Promise<v
     const history = path.join(scratch.global, "model-configurator-last-applied.json")
     await saveLastApplied(history, configFile, "previous")
     await mkdir(`${history}.lock`)
+    await writeJson(path.join(`${history}.lock`, "owner-abc.json"), { pid: process.pid, hostname: hostname() })
     await savePreset(path.join(scratch.global, "model-configurator-presets.json"), {
       name: "saved", savedAt: "", assignments: { alpha: { model: "openai/new" } },
     })
@@ -4955,6 +5034,9 @@ await shouldWriteExactV1BytesAndCleanTemporaryFilesAfterAtomicMutations()
 await shouldPreserveUnownedTemporaryFileWhenExclusiveOpenCollides()
 await shouldKeepSeparateLastAppliedNamesWhenScopesDiffer()
 await shouldPreserveHistoryWhenInvalidOrLocked()
+await shouldRecoverHistoryLockWhenOwnerHasExited()
+await shouldPreserveInvalidUtf8WhenHistoryIsLoadedOrSaved()
+await shouldKeepConcurrentHistoryWritesSerialized()
 await shouldShowHistoricalPresetWhenReopenedAfterManualEdits()
 await shouldWarnWithoutRevertingApplyWhenHistoryWriteFails()
 await shouldUpdatePresetBySelectingExistingName()

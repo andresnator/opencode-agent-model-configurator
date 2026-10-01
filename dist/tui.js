@@ -2462,12 +2462,16 @@ function errorReason(error) {
 
 // src/last-applied.ts
 import { randomUUID } from "node:crypto";
-import { mkdir as mkdir2, open as open2, readFile as readFile3, rename, rm as rm2, rmdir as rmdir2 } from "node:fs/promises";
+import { mkdir as mkdir2, open as open2, readFile as readFile3, readdir as readdir2, rename, rm as rm2, rmdir as rmdir2, unlink, writeFile } from "node:fs/promises";
+import { hostname } from "node:os";
 import path3 from "node:path";
+import { TextDecoder } from "node:util";
 var HISTORY_FILE = "model-configurator-last-applied.json";
 var HISTORY_VERSION = 1;
 var PRIVATE_FILE_MODE = 384;
 var PRIVATE_DIRECTORY_MODE2 = 448;
+var LOCK_ATTEMPTS = 3;
+var FATAL_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 function lastAppliedFile(runtime) {
   return path3.join(globalConfigRoot(runtime), HISTORY_FILE);
 }
@@ -2478,7 +2482,7 @@ async function saveLastApplied(file, configFile, name) {
   if (!name.trim()) throw new Error("Last applied preset name cannot be empty.");
   await mkdir2(path3.dirname(file), { recursive: true, mode: PRIVATE_DIRECTORY_MODE2 });
   const lock = `${file}.lock`;
-  await mkdir2(lock, { mode: PRIVATE_DIRECTORY_MODE2 });
+  const owner = await acquireLock(lock);
   const temporary = `${file}.${randomUUID()}.tmp`;
   let temporaryOwned = false;
   try {
@@ -2499,17 +2503,96 @@ async function saveLastApplied(file, configFile, name) {
     try {
       if (temporaryOwned) await rm2(temporary, { force: true });
     } finally {
-      await rmdir2(lock);
+      await releaseLock(lock, owner);
     }
   }
 }
-async function readHistory(file) {
-  let content;
+async function acquireLock(lock) {
+  const owner = `owner-${randomUUID()}.json`;
+  const prepared = `${lock}.${randomUUID()}.pending`;
+  await mkdir2(prepared, { mode: PRIVATE_DIRECTORY_MODE2 });
   try {
-    content = await readFile3(file, "utf8");
+    await writeFile(path3.join(prepared, owner), JSON.stringify({ pid: process.pid, hostname: hostname() }), {
+      flag: "wx",
+      mode: PRIVATE_FILE_MODE
+    });
+    for (let attempt = 0; attempt < LOCK_ATTEMPTS; attempt += 1) {
+      try {
+        await rename(prepared, lock);
+        return owner;
+      } catch (error) {
+        if (!hasCode(error, "EEXIST") && !hasCode(error, "ENOTEMPTY")) throw error;
+        if (!await recoverAbandonedLock(lock)) throw lockConflict(lock);
+      }
+    }
+    throw lockConflict(lock);
+  } finally {
+    await rm2(prepared, { recursive: true, force: true });
+  }
+}
+async function recoverAbandonedLock(lock) {
+  let entries;
+  try {
+    entries = await readdir2(lock);
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) return true;
+    throw error;
+  }
+  if (entries.length === 0) return removeEmptyLock(lock);
+  if (entries.length !== 1 || !/^owner-[\da-f-]+\.json$/.test(entries[0])) return false;
+  const ownerFile = path3.join(lock, entries[0]);
+  let owner;
+  try {
+    owner = JSON.parse(FATAL_UTF8_DECODER.decode(await readFile3(ownerFile)));
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) return true;
+    return false;
+  }
+  if (!isRecord4(owner) || owner.hostname !== hostname() || !Number.isSafeInteger(owner.pid) || owner.pid <= 0) return false;
+  try {
+    process.kill(owner.pid, 0);
+    return false;
+  } catch (error) {
+    if (!hasCode(error, "ESRCH")) return false;
+  }
+  try {
+    await unlink(ownerFile);
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) return true;
+    throw error;
+  }
+  return removeEmptyLock(lock);
+}
+async function releaseLock(lock, owner) {
+  await unlink(path3.join(lock, owner));
+  await removeEmptyLock(lock);
+}
+async function removeEmptyLock(lock) {
+  try {
+    await rmdir2(lock);
+    return true;
+  } catch (error) {
+    if (hasCode(error, "ENOENT")) return true;
+    if (hasCode(error, "ENOTEMPTY") || hasCode(error, "EEXIST")) return false;
+    throw error;
+  }
+}
+function lockConflict(lock) {
+  return Object.assign(new Error(`Last applied preset history is locked at ${lock}.`), { code: "EEXIST" });
+}
+async function readHistory(file) {
+  let bytes;
+  try {
+    bytes = await readFile3(file);
   } catch (error) {
     if (error.code === "ENOENT") return /* @__PURE__ */ Object.create(null);
     throw error;
+  }
+  let content;
+  try {
+    content = FATAL_UTF8_DECODER.decode(bytes);
+  } catch {
+    throw new Error(`Invalid last applied preset history at ${file}: file is not valid UTF-8.`);
   }
   const raw = JSON.parse(content);
   if (!isRecord4(raw) || raw.version !== HISTORY_VERSION || Object.keys(raw).some((key) => key !== "version" && key !== "lastApplied") || !isRecord4(raw.lastApplied)) throw new Error(`Invalid last applied preset history at ${file}.`);
@@ -2525,12 +2608,15 @@ async function readHistory(file) {
 function isRecord4(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
+function hasCode(error, code) {
+  return isRecord4(error) && error.code === code;
+}
 
 // src/presets.ts
 import { randomBytes as randomBytes2 } from "node:crypto";
 import { mkdir as mkdir3, open as open3, readFile as readFile4, rename as rename2, rm as rm3 } from "node:fs/promises";
 import path4 from "node:path";
-import { TextDecoder } from "node:util";
+import { TextDecoder as TextDecoder2 } from "node:util";
 var PRESETS_FILE = "model-configurator-presets.json";
 var PRESETS_VERSION = 1;
 var DEFAULT_FILE_MODE2 = 384;
@@ -2538,7 +2624,7 @@ var PRESET_DOCUMENT_KEYS = ["version", "presets"];
 var PRESET_KEYS = ["name", "savedAt", "assignments"];
 var ASSIGNMENT_KEYS = ["model", "variant"];
 var FORBIDDEN_KEYS = /* @__PURE__ */ new Set(["__proto__", "constructor", "prototype"]);
-var FATAL_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
+var FATAL_UTF8_DECODER2 = new TextDecoder2("utf-8", { fatal: true, ignoreBOM: true });
 var PresetConflictError = class extends Error {
 };
 function presetsFile(runtime) {
@@ -2554,7 +2640,7 @@ async function loadPresets(file) {
   }
   let content;
   try {
-    content = FATAL_UTF8_DECODER.decode(bytes);
+    content = FATAL_UTF8_DECODER2.decode(bytes);
   } catch {
     throw invalidPresetStorage(file, "file is not valid UTF-8");
   }
