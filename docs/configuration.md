@@ -85,9 +85,9 @@ The plugin checks the live catalog again before the final write. If a model or v
 
 When updating a preset, the plugin also checks that another process did not change or delete it. If it changed, the update stops and keeps the newer data.
 
-The agent menu, change review, and preset update selector show **Last applied preset** for the selected scope. The corresponding saved preset has OpenCode's `●` current marker, and the selector opens with focus on that preset. Moving the blue cursor to another row does not change the marker or apply a preset; applying still requires confirmation. This is the last preset successfully applied by this plugin, not a comparison with the current models: manual edits do not change the name. Global configuration and each project's configuration have separate records.
+The agent menu and preset update selector mark the last applied saved preset for the selected scope with OpenCode's `●` current marker, and the selector opens with focus on that preset. Moving the blue cursor to another row does not change the marker or apply a preset; applying still requires confirmation. This is the last preset successfully applied by this plugin, not a comparison with the current models: manual edits do not change the name. Global configuration and each project's configuration have separate records.
 
-Existing installations show **unknown** until the next successful apply. Deleting a preset preserves its last-applied name and shows **No longer saved**. Unreadable history shows a warning and **unknown**; a history write failure warns that configuration was applied but the name could not be saved.
+Existing installations have no marked preset until the next successful apply. Deleting a preset preserves its history but leaves no preset marked. Unreadable history shows a warning and leaves no preset marked; a history write failure warns that configuration was applied but the name could not be saved.
 
 ## Check environment overrides
 

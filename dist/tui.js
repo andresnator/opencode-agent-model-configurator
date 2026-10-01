@@ -2978,7 +2978,7 @@ async function runHubStep(api, state) {
         title: section.title,
         value: GROUP_PREFIX + section.key,
         description: section.description,
-        category: lastAppliedLabel(state)
+        category: "Agents"
       });
     }
     const hiddenCount = state.agents.filter((agent) => agent.hidden).length;
@@ -2987,7 +2987,7 @@ async function runHubStep(api, state) {
         title: state.showHidden ? "Hide internal agents" : "Show internal agents",
         value: TOGGLE_HIDDEN,
         description: `${hiddenCount} agent${hiddenCount === 1 ? "" : "s"} OpenCode marks as internal`,
-        category: lastAppliedLabel(state)
+        category: "Agents"
       });
     }
     for (const file of state.profiles) {
@@ -3003,7 +3003,7 @@ async function runHubStep(api, state) {
         title: preset.name,
         value: PRESET_PREFIX + preset.name,
         description: presetDescription(preset),
-        category: `Saved presets \u2014 ${lastAppliedLabel(state)}`
+        category: "Saved presets"
       });
     }
     const selected = await select(api, "Agents", options, BACK_HINT, lastAppliedValue(state, PRESET_PREFIX));
@@ -3309,8 +3309,8 @@ async function runReviewStep(api, state) {
     api,
     title,
     [
-      ...actions.map((action) => ({ ...action, category: lastAppliedLabel(state) })),
-      { title: "Cancel", value: CANCEL, category: lastAppliedLabel(state) },
+      ...actions,
+      { title: "Cancel", value: CANCEL },
       ...rows.map((change) => ({
         title: change.agent,
         value: `__change__:${change.agent}`,
@@ -3434,7 +3434,6 @@ async function selectPresetToUpdate(api, state) {
       ...state.presets.map((preset) => ({
         title: preset.name,
         value: UPDATE_PRESET_PREFIX + preset.name,
-        category: lastAppliedLabel(state),
         description: presetDescription(preset)
       }))
     ],
@@ -3496,11 +3495,6 @@ function presetDescription(preset) {
   const count = Object.keys(preset.assignments).length;
   const saved = preset.savedAt ? ` \u2014 saved ${preset.savedAt.slice(0, 10)}` : "";
   return `${count} agent${count === 1 ? "" : "s"}${saved}`;
-}
-function lastAppliedLabel(state) {
-  const name = state.lastAppliedPreset;
-  const removed = name && state.presetStorageAvailable && !state.presets.some((preset) => preset.name === name);
-  return `Last applied preset: ${name ?? "unknown"}${removed ? " (no longer saved)" : ""}`;
 }
 function lastAppliedValue(state, prefix) {
   const name = state.lastAppliedPreset;

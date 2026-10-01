@@ -232,7 +232,7 @@ async function runHubStep(api: TuiPluginApi, state: WizardState): Promise<StepOu
         title: section.title,
         value: GROUP_PREFIX + section.key,
         description: section.description,
-        category: lastAppliedLabel(state),
+        category: "Agents",
       })
     }
     const hiddenCount = state.agents.filter((agent) => agent.hidden).length
@@ -241,7 +241,7 @@ async function runHubStep(api: TuiPluginApi, state: WizardState): Promise<StepOu
         title: state.showHidden ? "Hide internal agents" : "Show internal agents",
         value: TOGGLE_HIDDEN,
         description: `${hiddenCount} agent${hiddenCount === 1 ? "" : "s"} OpenCode marks as internal`,
-        category: lastAppliedLabel(state),
+        category: "Agents",
       })
     }
     for (const file of state.profiles) {
@@ -257,7 +257,7 @@ async function runHubStep(api: TuiPluginApi, state: WizardState): Promise<StepOu
         title: preset.name,
         value: PRESET_PREFIX + preset.name,
         description: presetDescription(preset),
-        category: `Saved presets — ${lastAppliedLabel(state)}`,
+        category: "Saved presets",
       })
     }
 
@@ -604,8 +604,8 @@ async function runReviewStep(api: TuiPluginApi, state: WizardState): Promise<Ste
     api,
     title,
     [
-      ...actions.map((action) => ({ ...action, category: lastAppliedLabel(state) })),
-      { title: "Cancel", value: CANCEL, category: lastAppliedLabel(state) },
+      ...actions,
+      { title: "Cancel", value: CANCEL },
       ...rows.map((change) => ({
         title: change.agent,
         value: `__change__:${change.agent}`,
@@ -740,7 +740,6 @@ async function selectPresetToUpdate(api: TuiPluginApi, state: WizardState): Prom
       ...state.presets.map((preset) => ({
         title: preset.name,
         value: UPDATE_PRESET_PREFIX + preset.name,
-        category: lastAppliedLabel(state),
         description: presetDescription(preset),
       })),
     ],
@@ -817,12 +816,6 @@ function presetDescription(preset: StoredPreset): string {
   const count = Object.keys(preset.assignments).length
   const saved = preset.savedAt ? ` — saved ${preset.savedAt.slice(0, 10)}` : ""
   return `${count} agent${count === 1 ? "" : "s"}${saved}`
-}
-
-function lastAppliedLabel(state: WizardState): string {
-  const name = state.lastAppliedPreset
-  const removed = name && state.presetStorageAvailable && !state.presets.some((preset) => preset.name === name)
-  return `Last applied preset: ${name ?? "unknown"}${removed ? " (no longer saved)" : ""}`
 }
 
 function lastAppliedValue(state: WizardState, prefix: string): string | undefined {

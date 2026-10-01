@@ -3191,9 +3191,9 @@ async function shouldShowHistoricalPresetWhenReopenedAfterManualEdits(): Promise
 
     // Then
     assert.deepEqual(observed, [
-      { category: "Last applied preset: saved", current: "__preset__:saved" },
-      { category: "Last applied preset: saved (no longer saved)", current: undefined },
-      { category: "Last applied preset: unknown", current: undefined },
+      { category: "Agents", current: "__preset__:saved" },
+      { category: "Agents", current: undefined },
+      { category: "Agents", current: undefined },
     ])
     assert.ok(toasts.some((toast) => toast.variant === "warning" && toast.message?.includes("history unavailable")))
     assert.equal(await readFile(configFile, "utf8"), '{"agent":{"alpha":{"model":"manual/model"}}}')
@@ -3222,7 +3222,7 @@ async function shouldWarnWithoutRevertingApplyWhenHistoryWriteFails(): Promise<v
         if (title === "Agents") return option(options, "__preset__:saved")
         if (title === "Preset: saved") return option(options, "__apply_preset__")
         if (title.startsWith("Apply ")) {
-          assert.equal(options.filter((row) => !row.disabled)[0]?.category, "Last applied preset: previous (no longer saved)")
+          assert.equal(options.filter((row) => !row.disabled)[0]?.category, undefined)
           return option(options, "__apply_named_preset__")
         }
         throw new Error(`unexpected select dialog: ${title}`)
@@ -3269,7 +3269,7 @@ async function shouldUpdatePresetBySelectingExistingName(): Promise<void> {
         if (title.startsWith("Apply ")) return option(options, "__update_preset__")
         if (title === "Select preset to update") {
           const visible = options.filter((row) => !row.disabled)
-          assert.equal(visible[0]?.category, "Last applied preset: saved")
+          assert.equal(visible[0]?.category, undefined)
           assert.equal(current, "__update_preset__:saved")
           return option(options, "__update_preset__:saved")
         }
