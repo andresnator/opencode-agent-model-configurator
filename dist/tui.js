@@ -1031,12 +1031,12 @@ function parseTree(text, errors = [], options = ParseOptions.DEFAULT) {
   }
   return result;
 }
-function findNodeAtLocation(root, path4) {
+function findNodeAtLocation(root, path5) {
   if (!root) {
     return void 0;
   }
   let node = root;
-  for (let segment of path4) {
+  for (let segment of path5) {
     if (typeof segment === "string") {
       if (node.type !== "object" || !Array.isArray(node.children)) {
         return void 0;
@@ -1390,14 +1390,14 @@ function getNodeType(value) {
 
 // node_modules/.pnpm/jsonc-parser@3.3.1/node_modules/jsonc-parser/lib/esm/impl/edit.js
 function setProperty(text, originalPath, value, options) {
-  const path4 = originalPath.slice();
+  const path5 = originalPath.slice();
   const errors = [];
   const root = parseTree(text, errors);
   let parent = void 0;
   let lastSegment = void 0;
-  while (path4.length > 0) {
-    lastSegment = path4.pop();
-    parent = findNodeAtLocation(root, path4);
+  while (path5.length > 0) {
+    lastSegment = path5.pop();
+    parent = findNodeAtLocation(root, path5);
     if (parent === void 0 && value !== void 0) {
       if (typeof lastSegment === "string") {
         value = { [lastSegment]: value };
@@ -1620,8 +1620,8 @@ function printParseErrorCode(code) {
   }
   return "<unknown ParseErrorCode>";
 }
-function modify(text, path4, value, options) {
-  return setProperty(text, path4, value, options);
+function modify(text, path5, value, options) {
+  return setProperty(text, path5, value, options);
 }
 function applyEdits(text, edits) {
   let sortedEdits = edits.slice(0).sort((a, b) => {
@@ -2460,10 +2460,76 @@ function errorReason(error) {
   return error instanceof Error ? error.message : "unknown hot-apply error";
 }
 
+// src/last-applied.ts
+import { randomUUID } from "node:crypto";
+import { mkdir as mkdir2, open as open2, readFile as readFile3, rename, rm as rm2, rmdir as rmdir2 } from "node:fs/promises";
+import path3 from "node:path";
+var HISTORY_FILE = "model-configurator-last-applied.json";
+var HISTORY_VERSION = 1;
+var PRIVATE_FILE_MODE = 384;
+var PRIVATE_DIRECTORY_MODE2 = 448;
+function lastAppliedFile(runtime) {
+  return path3.join(globalConfigRoot(runtime), HISTORY_FILE);
+}
+async function loadLastApplied(file, configFile) {
+  return (await readHistory(file))[path3.resolve(configFile)];
+}
+async function saveLastApplied(file, configFile, name) {
+  if (!name.trim()) throw new Error("Last applied preset name cannot be empty.");
+  await mkdir2(path3.dirname(file), { recursive: true, mode: PRIVATE_DIRECTORY_MODE2 });
+  const lock = `${file}.lock`;
+  await mkdir2(lock, { mode: PRIVATE_DIRECTORY_MODE2 });
+  const temporary = `${file}.${randomUUID()}.tmp`;
+  let temporaryOwned = false;
+  try {
+    const lastApplied = await readHistory(file);
+    lastApplied[path3.resolve(configFile)] = name;
+    const handle = await open2(temporary, "wx", PRIVATE_FILE_MODE);
+    temporaryOwned = true;
+    try {
+      await handle.writeFile(`${JSON.stringify({ version: HISTORY_VERSION, lastApplied }, null, 2)}
+`, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(temporary, file);
+    temporaryOwned = false;
+  } finally {
+    try {
+      if (temporaryOwned) await rm2(temporary, { force: true });
+    } finally {
+      await rmdir2(lock);
+    }
+  }
+}
+async function readHistory(file) {
+  let content;
+  try {
+    content = await readFile3(file, "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") return /* @__PURE__ */ Object.create(null);
+    throw error;
+  }
+  const raw = JSON.parse(content);
+  if (!isRecord4(raw) || raw.version !== HISTORY_VERSION || Object.keys(raw).some((key) => key !== "version" && key !== "lastApplied") || !isRecord4(raw.lastApplied)) throw new Error(`Invalid last applied preset history at ${file}.`);
+  const history = /* @__PURE__ */ Object.create(null);
+  for (const [configFile, name] of Object.entries(raw.lastApplied)) {
+    if (!path3.isAbsolute(configFile) || typeof name !== "string" || !name.trim()) {
+      throw new Error(`Invalid last applied preset history at ${file}.`);
+    }
+    history[configFile] = name;
+  }
+  return history;
+}
+function isRecord4(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 // src/presets.ts
 import { randomBytes as randomBytes2 } from "node:crypto";
-import { mkdir as mkdir2, open as open2, readFile as readFile3, rename, rm as rm2 } from "node:fs/promises";
-import path3 from "node:path";
+import { mkdir as mkdir3, open as open3, readFile as readFile4, rename as rename2, rm as rm3 } from "node:fs/promises";
+import path4 from "node:path";
 import { TextDecoder } from "node:util";
 var PRESETS_FILE = "model-configurator-presets.json";
 var PRESETS_VERSION = 1;
@@ -2476,12 +2542,12 @@ var FATAL_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true
 var PresetConflictError = class extends Error {
 };
 function presetsFile(runtime) {
-  return path3.join(globalConfigRoot(runtime), PRESETS_FILE);
+  return path4.join(globalConfigRoot(runtime), PRESETS_FILE);
 }
 async function loadPresets(file) {
   let bytes;
   try {
-    bytes = await readFile3(file);
+    bytes = await readFile4(file);
   } catch (error) {
     if (isMissing2(error)) return [];
     throw unreadablePresetStorage(file, error);
@@ -2542,13 +2608,13 @@ async function writePresets(file, presets) {
   validatePresetDocument(document, file);
   const rendered = `${JSON.stringify(document, null, 2)}
 `;
-  const directory = path3.dirname(file);
-  await mkdir2(directory, { recursive: true, mode: 448 });
+  const directory = path4.dirname(file);
+  await mkdir3(directory, { recursive: true, mode: 448 });
   const suffix = `${timestamp2()}-${randomBytes2(3).toString("hex")}`;
   const temporary = `${file}.${suffix}.tmp`;
   let temporaryOwned = false;
   try {
-    const handle = await open2(temporary, "wx", DEFAULT_FILE_MODE2);
+    const handle = await open3(temporary, "wx", DEFAULT_FILE_MODE2);
     temporaryOwned = true;
     try {
       await handle.writeFile(rendered, "utf8");
@@ -2556,16 +2622,16 @@ async function writePresets(file, presets) {
     } finally {
       await handle.close();
     }
-    await rename(temporary, file);
+    await rename2(temporary, file);
     temporaryOwned = false;
     await syncDirectory2(directory);
   } catch (error) {
-    if (temporaryOwned) await rm2(temporary, { force: true }).catch(() => void 0);
+    if (temporaryOwned) await rm3(temporary, { force: true }).catch(() => void 0);
     throw error;
   }
 }
 function validatePresetDocument(raw, file) {
-  if (!isRecord4(raw)) throw invalidPresetStorage(file, "root must be an object");
+  if (!isRecord5(raw)) throw invalidPresetStorage(file, "root must be an object");
   assertExactKeys(raw, PRESET_DOCUMENT_KEYS, "root", file);
   if (!Object.hasOwn(raw, "version")) throw invalidPresetStorage(file, "version is missing");
   if (typeof raw.version !== "number") throw invalidPresetStorage(file, "version must be numeric");
@@ -2597,7 +2663,7 @@ function storedPresetsEqual(left, right) {
   });
 }
 async function syncDirectory2(directory) {
-  const handle = await open2(directory, "r");
+  const handle = await open3(directory, "r");
   try {
     await handle.sync();
   } finally {
@@ -2606,7 +2672,7 @@ async function syncDirectory2(directory) {
 }
 function validatePreset(raw, index, file) {
   const presetPath = `presets[${index}]`;
-  if (!isRecord4(raw)) throw invalidPresetStorage(file, `${presetPath} must be an object`);
+  if (!isRecord5(raw)) throw invalidPresetStorage(file, `${presetPath} must be an object`);
   assertExactKeys(raw, PRESET_KEYS, presetPath, file);
   if (!Object.hasOwn(raw, "name") || typeof raw.name !== "string" || raw.name.length === 0) {
     throw invalidPresetStorage(file, `${presetPath}.name must be a non-empty string`);
@@ -2617,7 +2683,7 @@ function validatePreset(raw, index, file) {
   if (!Object.hasOwn(raw, "assignments")) {
     throw invalidPresetStorage(file, `${presetPath}.assignments is missing`);
   }
-  if (!isRecord4(raw.assignments)) {
+  if (!isRecord5(raw.assignments)) {
     throw invalidPresetStorage(file, `${presetPath}.assignments must be an object`);
   }
   const assignments = {};
@@ -2627,7 +2693,7 @@ function validatePreset(raw, index, file) {
     }
     const value = raw.assignments[agent];
     const assignmentPath = `${presetPath}.assignments.${agent}`;
-    if (!isRecord4(value)) throw invalidPresetStorage(file, `${assignmentPath} must be an object`);
+    if (!isRecord5(value)) throw invalidPresetStorage(file, `${assignmentPath} must be an object`);
     assertExactKeys(value, ASSIGNMENT_KEYS, assignmentPath, file);
     if (!Object.hasOwn(value, "model") || typeof value.model !== "string" || value.model.length === 0) {
       throw invalidPresetStorage(file, `${assignmentPath}.model must be a non-empty string`);
@@ -2665,11 +2731,11 @@ function unreadablePresetStorage(file, error) {
 function timestamp2() {
   return (/* @__PURE__ */ new Date()).toISOString().replace(/[-:TZ.]/g, "").slice(0, 14);
 }
-function isRecord4(value) {
+function isRecord5(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 function isMissing2(error) {
-  return isRecord4(error) && error.code === "ENOENT";
+  return isRecord5(error) && error.code === "ENOENT";
 }
 
 // src/wizard.tsx
@@ -2695,6 +2761,7 @@ var GROUP_PREFIX = "__group__:";
 var OTHER_GROUP = "__other_subagents__";
 var TOGGLE_HIDDEN = "__toggle_hidden__";
 var REVIEW_CHANGES = "__review_changes__";
+var LAST_APPLIED = "__last_applied__";
 var BACK_HINT = "esc: back";
 var CLOSE_HINT = "esc: close";
 var AGENTS_HINT = "esc: back to agents";
@@ -2801,12 +2868,18 @@ async function runScopeStep(api, state) {
   state.scope = scope;
   state.configFile = scope === "project" ? projectFile : globalFile;
   state.snapshot = await readConfigSnapshot(state.configFile);
+  state.lastAppliedPreset = void 0;
+  try {
+    state.lastAppliedPreset = await loadLastApplied(lastAppliedFile(api.state.path), state.configFile);
+  } catch (error) {
+    api.ui.toast({ variant: "warning", message: `Last applied preset history unavailable: ${errorMessage(error)}` });
+  }
   return "next";
 }
 async function runHubStep(api, state) {
   while (true) {
     const pending = state.decisions?.size ?? 0;
-    const options = [];
+    const options = [lastAppliedRow(state)];
     if (pending > 0) {
       options.push({
         title: `Review ${pending} pending change${pending === 1 ? "" : "s"}`,
@@ -2844,7 +2917,7 @@ async function runHubStep(api, state) {
       options.push({
         title: preset.name,
         value: PRESET_PREFIX + preset.name,
-        description: presetDescription(preset),
+        description: markedPresetDescription(state, preset),
         category: "Saved presets"
       });
     }
@@ -3151,6 +3224,7 @@ async function runReviewStep(api, state) {
     api,
     title,
     [
+      lastAppliedRow(state),
       ...actions,
       { title: "Cancel", value: CANCEL },
       ...rows.map((change) => ({
@@ -3234,6 +3308,16 @@ async function runReviewStep(api, state) {
     });
     return "done";
   }
+  try {
+    await saveLastApplied(lastAppliedFile(api.state.path), result.file, presetName);
+    state.lastAppliedPreset = presetName;
+  } catch (error) {
+    api.ui.toast({
+      variant: "warning",
+      message: `Configuration was applied, but the last applied preset name could not be saved: ${errorMessage(error)}`,
+      duration: 8e3
+    });
+  }
   api.ui.toast({
     variant: "success",
     title: "Agent models updated",
@@ -3262,11 +3346,14 @@ async function selectPresetToUpdate(api, state) {
   const selected = await select(
     api,
     "Select preset to update",
-    state.presets.map((preset) => ({
-      title: preset.name,
-      value: UPDATE_PRESET_PREFIX + preset.name,
-      description: presetDescription(preset)
-    })),
+    [
+      lastAppliedRow(state),
+      ...state.presets.map((preset) => ({
+        title: preset.name,
+        value: UPDATE_PRESET_PREFIX + preset.name,
+        description: markedPresetDescription(state, preset)
+      }))
+    ],
     BACK_HINT
   );
   if (!selected?.startsWith(UPDATE_PRESET_PREFIX)) return void 0;
@@ -3324,6 +3411,20 @@ function presetDescription(preset) {
   const count = Object.keys(preset.assignments).length;
   const saved = preset.savedAt ? ` \u2014 saved ${preset.savedAt.slice(0, 10)}` : "";
   return `${count} agent${count === 1 ? "" : "s"}${saved}`;
+}
+function lastAppliedRow(state) {
+  const name = state.lastAppliedPreset;
+  const removed = name && state.presetStorageAvailable && !state.presets.some((preset) => preset.name === name);
+  return {
+    title: `Last applied preset: ${name ?? "unknown"}`,
+    value: LAST_APPLIED,
+    description: removed ? "No longer saved" : "Last applied by this plugin at the selected scope",
+    disabled: true
+  };
+}
+function markedPresetDescription(state, preset) {
+  const description = presetDescription(preset);
+  return preset.name === state.lastAppliedPreset ? `Last applied \u2014 ${description}` : description;
 }
 function namedWriteUnavailableDescription(state) {
   if (!state.presetStorageAvailable) return "Repair preset storage and reopen model presets to enable named applies.";

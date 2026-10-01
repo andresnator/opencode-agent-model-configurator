@@ -30,6 +30,7 @@ const EXPECTED_PACKAGE_FILES = [
   "README.md",
   "dist/domain.d.ts",
   "dist/hot-apply.d.ts",
+  "dist/last-applied.d.ts",
   "dist/options.d.ts",
   "dist/persistence.d.ts",
   "dist/presets.d.ts",

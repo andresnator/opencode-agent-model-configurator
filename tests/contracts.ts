@@ -36,6 +36,7 @@ import {
   partitionPresetAssignments,
   savePreset,
 } from "../src/presets"
+import { lastAppliedFile, loadLastApplied, saveLastApplied } from "../src/last-applied"
 import { normalizePluginOptions } from "../src/options"
 import modelsPresetsPlugin, {
   MODELS_PRESETS_COMMAND_ID,
@@ -1170,6 +1171,8 @@ async function shouldLeaveConfigUntouchedWhenFinalReviewIsCancelled(): Promise<v
   try {
     // Given
     const configFile = path.join(scratch.project, ".opencode", "opencode.jsonc")
+    const history = path.join(scratch.global, "model-configurator-last-applied.json")
+    await saveLastApplied(history, configFile, "previous")
     const original = await readFile(configFile, "utf8")
     const api = createFakeApi(scratch, [], {
       select(title, options) {
@@ -1193,6 +1196,7 @@ async function shouldLeaveConfigUntouchedWhenFinalReviewIsCancelled(): Promise<v
     // Then
     assert.equal(await readFile(configFile, "utf8"), original)
     assert.deepEqual((await readdir(path.dirname(configFile))).sort(), ["opencode.jsonc"])
+    assert.equal(await loadLastApplied(history, configFile), "previous")
     pass("shouldLeaveConfigUntouchedWhenFinalReviewIsCancelled")
   } finally {
     await rm(scratch.root, { recursive: true, force: true })
@@ -1269,6 +1273,8 @@ async function shouldKeepNamedPresetWhenConfigurationApplyFails(): Promise<void>
   try {
     // Given a configuration that changes concurrently after the named review opens
     const configFile = path.join(scratch.project, ".opencode", "opencode.jsonc")
+    const history = path.join(scratch.global, "model-configurator-last-applied.json")
+    await saveLastApplied(history, configFile, "previous")
     const concurrent = '{\n  "external": true\n}\n'
     const toasts: TuiToast[] = []
     const api = createFakeApi(scratch, toasts, {
@@ -1306,6 +1312,7 @@ async function shouldKeepNamedPresetWhenConfigurationApplyFails(): Promise<void>
       ),
     )
 
+    assert.equal(await loadLastApplied(history, configFile), "previous")
     pass("shouldKeepNamedPresetWhenConfigurationApplyFails")
   } finally {
     await rm(scratch.root, { recursive: true, force: true })
@@ -1437,6 +1444,7 @@ async function shouldCreateNamedPresetWhenApplying(): Promise<void> {
     assert.equal(presets.length, 1)
     assert.equal(presets[0].name, "prod")
     assert.deepEqual(presets[0].assignments, { alpha: { model: "openai/new", variant: "high" } })
+    assert.equal(await loadLastApplied(lastAppliedFile(api.state.path), configFile), "prod")
     pass("shouldCreateNamedPresetWhenApplying")
   } finally {
     await rm(scratch.root, { recursive: true, force: true })
@@ -1538,6 +1546,7 @@ async function shouldApplyPresetSkippingTiersAndOverrides(): Promise<void> {
     })
     assert.equal(applyActionTitle, 'Apply preset "saved"')
     assert.equal(toasts.at(-1)?.variant, "success")
+    assert.equal(await loadLastApplied(lastAppliedFile(api.state.path), configFile), "saved")
     pass("shouldApplyPresetSkippingTiersAndOverrides")
   } finally {
     await rm(scratch.root, { recursive: true, force: true })
@@ -3009,6 +3018,153 @@ async function shouldPreserveUnownedTemporaryFileWhenExclusiveOpenCollides(): Pr
   }
 }
 
+async function shouldKeepSeparateLastAppliedNamesWhenScopesDiffer(): Promise<void> {
+  const scratch = await createWizardFixture()
+  try {
+    // Given
+    const history = path.join(scratch.global, "model-configurator-last-applied.json")
+    const project = path.join(scratch.project, ".opencode", "opencode.jsonc")
+    const global = path.join(scratch.global, "opencode.json")
+    const otherProject = path.join(scratch.root, "other", ".opencode", "opencode.json")
+    assert.equal(await loadLastApplied(history, project), undefined)
+
+    // When
+    await saveLastApplied(history, project, "project-preset")
+    await saveLastApplied(history, global, "global-preset")
+    await saveLastApplied(history, otherProject, "other-preset")
+    await saveLastApplied(history, project, "updated")
+
+    // Then
+    assert.deepEqual(JSON.parse(await readFile(history, "utf8")), {
+      version: 1,
+      lastApplied: { [project]: "updated", [global]: "global-preset", [otherProject]: "other-preset" },
+    })
+    assert.equal((await stat(history)).mode & 0o777, 0o600)
+    assert.equal(await loadLastApplied(history, global), "global-preset")
+    pass("shouldKeepSeparateLastAppliedNamesWhenScopesDiffer")
+  } finally {
+    await rm(scratch.root, { recursive: true, force: true })
+  }
+}
+
+async function shouldPreserveHistoryWhenInvalidOrLocked(): Promise<void> {
+  const scratch = await createWizardFixture()
+  try {
+    // Given
+    const history = path.join(scratch.global, "model-configurator-last-applied.json")
+    const configFile = path.join(scratch.project, ".opencode", "opencode.jsonc")
+    await saveLastApplied(history, configFile, "previous")
+    const original = await readFile(history, "utf8")
+    await mkdir(`${history}.lock`)
+
+    // When
+    await assert.rejects(saveLastApplied(history, configFile, "new"), { code: "EEXIST" })
+
+    // Then
+    assert.equal(await readFile(history, "utf8"), original)
+    await rm(`${history}.lock`, { recursive: true })
+    for (const content of ['{', '{"version":2,"lastApplied":{}}', '{"version":1,"lastApplied":{"relative":"name"}}']) {
+      await writeFile(history, content)
+      await assert.rejects(loadLastApplied(history, configFile))
+      await assert.rejects(saveLastApplied(history, configFile, "new"))
+      assert.equal(await readFile(history, "utf8"), content)
+      assert.deepEqual(await readdir(scratch.global), ["model-configurator-last-applied.json"])
+    }
+    pass("shouldPreserveHistoryWhenInvalidOrLocked")
+  } finally {
+    await rm(scratch.root, { recursive: true, force: true })
+  }
+}
+
+async function shouldShowHistoricalPresetWhenReopenedAfterManualEdits(): Promise<void> {
+  const scratch = await createWizardFixture()
+  try {
+    // Given
+    const configFile = path.join(scratch.project, ".opencode", "opencode.jsonc")
+    const history = path.join(scratch.global, "model-configurator-last-applied.json")
+    const presets = path.join(scratch.global, "model-configurator-presets.json")
+    await saveLastApplied(history, configFile, "saved")
+    await savePreset(presets, { name: "saved", savedAt: "", assignments: { alpha: { model: "openai/new" } } })
+    await writeFile(configFile, '{"agent":{"alpha":{"model":"manual/model"}}}')
+    const observed: PolicyOption[] = []
+    let scopeVisits = 0
+    const toasts: TuiToast[] = []
+    const api = createFakeApi(scratch, toasts, {
+      select(title, options, current) {
+        if (title === "Configuration scope") return ++scopeVisits % 2 === 1 ? option(options, "project") : "escape"
+        if (title === "Agents") {
+          observed.push(options.find((row) => row.value === "__last_applied__")!)
+          const saved = options.find((row) => row.value === "__preset__:saved")
+          if (saved) assert.match(saved.description!, /^Last applied — /)
+          assert.equal(current, undefined)
+          return "escape"
+        }
+        throw new Error(`unexpected select dialog: ${title}`)
+      },
+      confirm() { return true },
+    })
+
+    // When
+    await runModelConfigurator(api, scratch.profiles)
+    await deletePreset(presets, "saved")
+    await runModelConfigurator(api, scratch.profiles)
+    await writeFile(history, "invalid history")
+    await runModelConfigurator(api, scratch.profiles)
+
+    // Then
+    assert.deepEqual(observed, [
+      { title: "Last applied preset: saved", value: "__last_applied__", description: "Last applied by this plugin at the selected scope", disabled: true },
+      { title: "Last applied preset: saved", value: "__last_applied__", description: "No longer saved", disabled: true },
+      { title: "Last applied preset: unknown", value: "__last_applied__", description: "Last applied by this plugin at the selected scope", disabled: true },
+    ])
+    assert.ok(toasts.some((toast) => toast.variant === "warning" && toast.message?.includes("history unavailable")))
+    assert.equal(await readFile(configFile, "utf8"), '{"agent":{"alpha":{"model":"manual/model"}}}')
+    pass("shouldShowHistoricalPresetWhenReopenedAfterManualEdits")
+  } finally {
+    await rm(scratch.root, { recursive: true, force: true })
+  }
+}
+
+async function shouldWarnWithoutRevertingApplyWhenHistoryWriteFails(): Promise<void> {
+  const scratch = await createWizardFixture()
+  try {
+    // Given
+    const configFile = path.join(scratch.project, ".opencode", "opencode.jsonc")
+    const history = path.join(scratch.global, "model-configurator-last-applied.json")
+    await saveLastApplied(history, configFile, "previous")
+    await mkdir(`${history}.lock`)
+    await savePreset(path.join(scratch.global, "model-configurator-presets.json"), {
+      name: "saved", savedAt: "", assignments: { alpha: { model: "openai/new" } },
+    })
+    const toasts: TuiToast[] = []
+    const api = createFakeApi(scratch, toasts, {
+      select(title, options) {
+        if (title === "Configuration scope") return option(options, "project")
+        if (title === "Agents") return option(options, "__preset__:saved")
+        if (title === "Preset: saved") return option(options, "__apply_preset__")
+        if (title.startsWith("Apply ")) {
+          assert.equal(options.find((row) => row.value === "__last_applied__")?.title, "Last applied preset: previous")
+          return option(options, "__apply_named_preset__")
+        }
+        throw new Error(`unexpected select dialog: ${title}`)
+      },
+      confirm() { return true },
+    })
+
+    // When
+    await runModelConfigurator(api, scratch.profiles)
+
+    // Then
+    assert.equal((await readConfigSnapshot(configFile)).mappings.alpha.model, "openai/new")
+    assert.equal(await loadLastApplied(history, configFile), "previous")
+    assert.ok(toasts.some((toast) => toast.variant === "warning" && toast.message?.includes("Configuration was applied")))
+    assert.equal(toasts.at(-1)?.variant, "success")
+    pass("shouldWarnWithoutRevertingApplyWhenHistoryWriteFails")
+  } finally {
+    await rm(scratch.root, { recursive: true, force: true })
+  }
+}
+
 async function shouldUpdatePresetBySelectingExistingName(): Promise<void> {
   const scratch = await createWizardFixture()
   try {
@@ -3020,10 +3176,11 @@ async function shouldUpdatePresetBySelectingExistingName(): Promise<void> {
       savedAt: "2026-01-01T00:00:00.000Z",
       assignments: { alpha: { model: "openai/new", variant: "high" } },
     })
+    await saveLastApplied(path.join(scratch.global, "model-configurator-last-applied.json"), configFile, "saved")
     const toasts: TuiToast[] = []
     let promptCalls = 0
     const api = createFakeApi(scratch, toasts, {
-      select(title, options) {
+      select(title, options, current) {
         if (title === "Configuration scope") return option(options, "project")
         if (title === "Agents") return option(options, "default")
         if (title === "Tier: high") return option(options, "openai/new")
@@ -3031,7 +3188,12 @@ async function shouldUpdatePresetBySelectingExistingName(): Promise<void> {
         if (title === "Tier: low") return option(options, "__keep_current__")
         if (title === "Individual overrides") return option(options, "__override_no__")
         if (title.startsWith("Apply ")) return option(options, "__update_preset__")
-        if (title === "Select preset to update") return option(options, "__update_preset__:saved")
+        if (title === "Select preset to update") {
+          assert.equal(options.find((row) => row.value === "__last_applied__")?.title, "Last applied preset: saved")
+          assert.match(options.find((row) => row.value === "__update_preset__:saved")!.description!, /^Last applied — /)
+          assert.equal(current, undefined)
+          return option(options, "__update_preset__:saved")
+        }
         throw new Error(`unexpected select dialog: ${title}`)
       },
       confirm() {
@@ -3060,6 +3222,7 @@ async function shouldUpdatePresetBySelectingExistingName(): Promise<void> {
       alpha: { model: "openai/new", variant: "high" },
       beta: { model: "anthropic/old" },
     })
+    assert.equal(await loadLastApplied(lastAppliedFile(api.state.path), configFile), "saved")
     pass("shouldUpdatePresetBySelectingExistingName")
   } finally {
     await rm(scratch.root, { recursive: true, force: true })
@@ -4790,6 +4953,10 @@ await shouldRejectSaveAndDeleteBeforeWritingWhenStorageBecomesInvalid()
 await shouldUseLatestValidStorageForMutationsAndSupportFirstSave()
 await shouldWriteExactV1BytesAndCleanTemporaryFilesAfterAtomicMutations()
 await shouldPreserveUnownedTemporaryFileWhenExclusiveOpenCollides()
+await shouldKeepSeparateLastAppliedNamesWhenScopesDiffer()
+await shouldPreserveHistoryWhenInvalidOrLocked()
+await shouldShowHistoricalPresetWhenReopenedAfterManualEdits()
+await shouldWarnWithoutRevertingApplyWhenHistoryWriteFails()
 await shouldUpdatePresetBySelectingExistingName()
 await shouldRejectUpdateWhenSelectedPresetChangesConcurrently()
 await shouldToastAndRepromptWhenPresetNameIsEmpty()

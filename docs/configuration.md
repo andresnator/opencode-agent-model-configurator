@@ -85,6 +85,10 @@ The plugin checks the live catalog again before the final write. If a model or v
 
 When updating a preset, the plugin also checks that another process did not change or delete it. If it changed, the update stops and keeps the newer data.
 
+The agent menu, change review, and preset update selector show **Last applied preset** for the selected scope. The corresponding saved preset is marked without being automatically selected. This is the last preset successfully applied by this plugin, not a comparison with the current models: manual edits do not change the name. Global configuration and each project's configuration have separate records.
+
+Existing installations show **unknown** until the next successful apply. Deleting a preset preserves its last-applied name and shows **No longer saved**. Unreadable history shows a warning and **unknown**; a history write failure warns that configuration was applied but the name could not be saved.
+
 ## Check environment overrides
 
 `OPENCODE_CONFIG_CONTENT` and `OPENCODE_CONFIG` can override values from configuration files. The scope screen warns you when either variable is present.
@@ -97,6 +101,7 @@ In that case, a file write can succeed without changing the value OpenCode uses.
 | --- | --- |
 | Project or global OpenCode configuration | Changes only selected `agent.<name>.model` and `agent.<name>.variant` values; keeps other keys, JSONC comments, and file mode |
 | Global preset store | Saves named assignments in `model-configurator-presets.json` |
+| Global apply history | Records the last applied name by absolute configuration file path in `model-configurator-last-applied.json` after a successful apply |
 | Profile files | Reads only |
 | `tui.json` | Reads registration and `profilesDir`; never writes it |
 
