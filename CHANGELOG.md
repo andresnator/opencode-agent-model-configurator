@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.4](https://github.com/andresnator/opencode-agent-model-configurator/compare/v0.3.3...v0.3.4) (2026-10-01)
+
+
+### Bug Fixes
+
+* show the last applied preset with the native current marker ([#29](https://github.com/andresnator/opencode-agent-model-configurator/issues/29)) ([4766e52](https://github.com/andresnator/opencode-agent-model-configurator/commit/4766e52fbd40d568a6c9627c500c78ae6711a4c5))
+
 ## [0.3.3](https://github.com/andresnator/opencode-agent-model-configurator/compare/v0.3.2...v0.3.3) (2026-10-01)
 
 
