@@ -58,7 +58,6 @@ const GROUP_PREFIX = "__group__:"
 const OTHER_GROUP = "__other_subagents__"
 const TOGGLE_HIDDEN = "__toggle_hidden__"
 const REVIEW_CHANGES = "__review_changes__"
-const LAST_APPLIED = "__last_applied__"
 const BACK_HINT = "esc: back"
 const CLOSE_HINT = "esc: close"
 const AGENTS_HINT = "esc: back to agents"
@@ -219,7 +218,7 @@ async function runScopeStep(api: TuiPluginApi, state: WizardState): Promise<Step
 async function runHubStep(api: TuiPluginApi, state: WizardState): Promise<StepOutcome> {
   while (true) {
     const pending = state.decisions?.size ?? 0
-    const options: TuiDialogSelectOption<string>[] = [lastAppliedRow(state)]
+    const options: TuiDialogSelectOption<string>[] = []
     if (pending > 0) {
       options.push({
         title: `Review ${pending} pending change${pending === 1 ? "" : "s"}`,
@@ -233,7 +232,7 @@ async function runHubStep(api: TuiPluginApi, state: WizardState): Promise<StepOu
         title: section.title,
         value: GROUP_PREFIX + section.key,
         description: section.description,
-        category: "Agents",
+        category: lastAppliedLabel(state),
       })
     }
     const hiddenCount = state.agents.filter((agent) => agent.hidden).length
@@ -242,7 +241,7 @@ async function runHubStep(api: TuiPluginApi, state: WizardState): Promise<StepOu
         title: state.showHidden ? "Hide internal agents" : "Show internal agents",
         value: TOGGLE_HIDDEN,
         description: `${hiddenCount} agent${hiddenCount === 1 ? "" : "s"} OpenCode marks as internal`,
-        category: "Agents",
+        category: lastAppliedLabel(state),
       })
     }
     for (const file of state.profiles) {
@@ -257,12 +256,12 @@ async function runHubStep(api: TuiPluginApi, state: WizardState): Promise<StepOu
       options.push({
         title: preset.name,
         value: PRESET_PREFIX + preset.name,
-        description: markedPresetDescription(state, preset),
-        category: "Saved presets",
+        description: presetDescription(preset),
+        category: `Saved presets — ${lastAppliedLabel(state)}`,
       })
     }
 
-    const selected = await select(api, "Agents", options, BACK_HINT)
+    const selected = await select(api, "Agents", options, BACK_HINT, lastAppliedValue(state, PRESET_PREFIX))
     if (!selected) return "back"
 
     if (selected === TOGGLE_HIDDEN) {
@@ -605,9 +604,8 @@ async function runReviewStep(api: TuiPluginApi, state: WizardState): Promise<Ste
     api,
     title,
     [
-      lastAppliedRow(state),
-      ...actions,
-      { title: "Cancel", value: CANCEL },
+      ...actions.map((action) => ({ ...action, category: lastAppliedLabel(state) })),
+      { title: "Cancel", value: CANCEL, category: lastAppliedLabel(state) },
       ...rows.map((change) => ({
         title: change.agent,
         value: `__change__:${change.agent}`,
@@ -739,14 +737,15 @@ async function selectPresetToUpdate(api: TuiPluginApi, state: WizardState): Prom
     api,
     "Select preset to update",
     [
-      lastAppliedRow(state),
       ...state.presets.map((preset) => ({
         title: preset.name,
         value: UPDATE_PRESET_PREFIX + preset.name,
-        description: markedPresetDescription(state, preset),
+        category: lastAppliedLabel(state),
+        description: presetDescription(preset),
       })),
     ],
     BACK_HINT,
+    lastAppliedValue(state, UPDATE_PRESET_PREFIX),
   )
   if (!selected?.startsWith(UPDATE_PRESET_PREFIX)) return undefined
   const name = selected.slice(UPDATE_PRESET_PREFIX.length)
@@ -820,20 +819,15 @@ function presetDescription(preset: StoredPreset): string {
   return `${count} agent${count === 1 ? "" : "s"}${saved}`
 }
 
-function lastAppliedRow(state: WizardState): TuiDialogSelectOption<string> {
+function lastAppliedLabel(state: WizardState): string {
   const name = state.lastAppliedPreset
   const removed = name && state.presetStorageAvailable && !state.presets.some((preset) => preset.name === name)
-  return {
-    title: `Last applied preset: ${name ?? "unknown"}`,
-    value: LAST_APPLIED,
-    description: removed ? "No longer saved" : "Last applied by this plugin at the selected scope",
-    disabled: true,
-  }
+  return `Last applied preset: ${name ?? "unknown"}${removed ? " (no longer saved)" : ""}`
 }
 
-function markedPresetDescription(state: WizardState, preset: StoredPreset): string {
-  const description = presetDescription(preset)
-  return preset.name === state.lastAppliedPreset ? `Last applied — ${description}` : description
+function lastAppliedValue(state: WizardState, prefix: string): string | undefined {
+  const name = state.lastAppliedPreset
+  return name && state.presets.some((preset) => preset.name === name) ? prefix + name : undefined
 }
 
 function namedWriteUnavailableDescription(state: WizardState): string {

@@ -2847,7 +2847,6 @@ var GROUP_PREFIX = "__group__:";
 var OTHER_GROUP = "__other_subagents__";
 var TOGGLE_HIDDEN = "__toggle_hidden__";
 var REVIEW_CHANGES = "__review_changes__";
-var LAST_APPLIED = "__last_applied__";
 var BACK_HINT = "esc: back";
 var CLOSE_HINT = "esc: close";
 var AGENTS_HINT = "esc: back to agents";
@@ -2965,7 +2964,7 @@ async function runScopeStep(api, state) {
 async function runHubStep(api, state) {
   while (true) {
     const pending = state.decisions?.size ?? 0;
-    const options = [lastAppliedRow(state)];
+    const options = [];
     if (pending > 0) {
       options.push({
         title: `Review ${pending} pending change${pending === 1 ? "" : "s"}`,
@@ -2979,7 +2978,7 @@ async function runHubStep(api, state) {
         title: section.title,
         value: GROUP_PREFIX + section.key,
         description: section.description,
-        category: "Agents"
+        category: lastAppliedLabel(state)
       });
     }
     const hiddenCount = state.agents.filter((agent) => agent.hidden).length;
@@ -2988,7 +2987,7 @@ async function runHubStep(api, state) {
         title: state.showHidden ? "Hide internal agents" : "Show internal agents",
         value: TOGGLE_HIDDEN,
         description: `${hiddenCount} agent${hiddenCount === 1 ? "" : "s"} OpenCode marks as internal`,
-        category: "Agents"
+        category: lastAppliedLabel(state)
       });
     }
     for (const file of state.profiles) {
@@ -3003,11 +3002,11 @@ async function runHubStep(api, state) {
       options.push({
         title: preset.name,
         value: PRESET_PREFIX + preset.name,
-        description: markedPresetDescription(state, preset),
-        category: "Saved presets"
+        description: presetDescription(preset),
+        category: `Saved presets \u2014 ${lastAppliedLabel(state)}`
       });
     }
-    const selected = await select(api, "Agents", options, BACK_HINT);
+    const selected = await select(api, "Agents", options, BACK_HINT, lastAppliedValue(state, PRESET_PREFIX));
     if (!selected) return "back";
     if (selected === TOGGLE_HIDDEN) {
       state.showHidden = !state.showHidden;
@@ -3310,9 +3309,8 @@ async function runReviewStep(api, state) {
     api,
     title,
     [
-      lastAppliedRow(state),
-      ...actions,
-      { title: "Cancel", value: CANCEL },
+      ...actions.map((action) => ({ ...action, category: lastAppliedLabel(state) })),
+      { title: "Cancel", value: CANCEL, category: lastAppliedLabel(state) },
       ...rows.map((change) => ({
         title: change.agent,
         value: `__change__:${change.agent}`,
@@ -3433,14 +3431,15 @@ async function selectPresetToUpdate(api, state) {
     api,
     "Select preset to update",
     [
-      lastAppliedRow(state),
       ...state.presets.map((preset) => ({
         title: preset.name,
         value: UPDATE_PRESET_PREFIX + preset.name,
-        description: markedPresetDescription(state, preset)
+        category: lastAppliedLabel(state),
+        description: presetDescription(preset)
       }))
     ],
-    BACK_HINT
+    BACK_HINT,
+    lastAppliedValue(state, UPDATE_PRESET_PREFIX)
   );
   if (!selected?.startsWith(UPDATE_PRESET_PREFIX)) return void 0;
   const name = selected.slice(UPDATE_PRESET_PREFIX.length);
@@ -3498,19 +3497,14 @@ function presetDescription(preset) {
   const saved = preset.savedAt ? ` \u2014 saved ${preset.savedAt.slice(0, 10)}` : "";
   return `${count} agent${count === 1 ? "" : "s"}${saved}`;
 }
-function lastAppliedRow(state) {
+function lastAppliedLabel(state) {
   const name = state.lastAppliedPreset;
   const removed = name && state.presetStorageAvailable && !state.presets.some((preset) => preset.name === name);
-  return {
-    title: `Last applied preset: ${name ?? "unknown"}`,
-    value: LAST_APPLIED,
-    description: removed ? "No longer saved" : "Last applied by this plugin at the selected scope",
-    disabled: true
-  };
+  return `Last applied preset: ${name ?? "unknown"}${removed ? " (no longer saved)" : ""}`;
 }
-function markedPresetDescription(state, preset) {
-  const description = presetDescription(preset);
-  return preset.name === state.lastAppliedPreset ? `Last applied \u2014 ${description}` : description;
+function lastAppliedValue(state, prefix) {
+  const name = state.lastAppliedPreset;
+  return name && state.presets.some((preset) => preset.name === name) ? prefix + name : void 0;
 }
 function namedWriteUnavailableDescription(state) {
   if (!state.presetStorageAvailable) return "Repair preset storage and reopen model presets to enable named applies.";
