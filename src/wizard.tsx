@@ -16,6 +16,7 @@ import {
   type ProfileFile,
 } from "./domain"
 import { applyConfigChanges } from "./hot-apply"
+import { lastAppliedFile, loadLastApplied, saveLastApplied } from "./last-applied"
 import {
   displayConfigFile,
   higherPrecedenceWarning,
@@ -57,6 +58,7 @@ const GROUP_PREFIX = "__group__:"
 const OTHER_GROUP = "__other_subagents__"
 const TOGGLE_HIDDEN = "__toggle_hidden__"
 const REVIEW_CHANGES = "__review_changes__"
+const LAST_APPLIED = "__last_applied__"
 const BACK_HINT = "esc: back"
 const CLOSE_HINT = "esc: close"
 const AGENTS_HINT = "esc: back to agents"
@@ -84,6 +86,7 @@ type WizardState = {
   scope?: ConfigScope
   configFile?: string
   snapshot?: ConfigSnapshot
+  lastAppliedPreset?: string
   source?: { kind: "profile" | "agents" } | { kind: "preset"; name: string }
   selectedProfile?: ProfileFile
   tierDecisions?: Map<string, AgentDecision>
@@ -204,13 +207,19 @@ async function runScopeStep(api: TuiPluginApi, state: WizardState): Promise<Step
   state.scope = scope
   state.configFile = scope === "project" ? projectFile : globalFile
   state.snapshot = await readConfigSnapshot(state.configFile)
+  state.lastAppliedPreset = undefined
+  try {
+    state.lastAppliedPreset = await loadLastApplied(lastAppliedFile(api.state.path), state.configFile)
+  } catch (error) {
+    api.ui.toast({ variant: "warning", message: `Last applied preset history unavailable: ${errorMessage(error)}` })
+  }
   return "next"
 }
 
 async function runHubStep(api: TuiPluginApi, state: WizardState): Promise<StepOutcome> {
   while (true) {
     const pending = state.decisions?.size ?? 0
-    const options: TuiDialogSelectOption<string>[] = []
+    const options: TuiDialogSelectOption<string>[] = [lastAppliedRow(state)]
     if (pending > 0) {
       options.push({
         title: `Review ${pending} pending change${pending === 1 ? "" : "s"}`,
@@ -248,7 +257,7 @@ async function runHubStep(api: TuiPluginApi, state: WizardState): Promise<StepOu
       options.push({
         title: preset.name,
         value: PRESET_PREFIX + preset.name,
-        description: presetDescription(preset),
+        description: markedPresetDescription(state, preset),
         category: "Saved presets",
       })
     }
@@ -596,6 +605,7 @@ async function runReviewStep(api: TuiPluginApi, state: WizardState): Promise<Ste
     api,
     title,
     [
+      lastAppliedRow(state),
       ...actions,
       { title: "Cancel", value: CANCEL },
       ...rows.map((change) => ({
@@ -686,6 +696,16 @@ async function runReviewStep(api: TuiPluginApi, state: WizardState): Promise<Ste
     })
     return "done"
   }
+  try {
+    await saveLastApplied(lastAppliedFile(api.state.path), result.file, presetName!)
+    state.lastAppliedPreset = presetName
+  } catch (error) {
+    api.ui.toast({
+      variant: "warning",
+      message: `Configuration was applied, but the last applied preset name could not be saved: ${errorMessage(error)}`,
+      duration: 8000,
+    })
+  }
   api.ui.toast({
     variant: "success",
     title: "Agent models updated",
@@ -718,11 +738,14 @@ async function selectPresetToUpdate(api: TuiPluginApi, state: WizardState): Prom
   const selected = await select(
     api,
     "Select preset to update",
-    state.presets.map((preset) => ({
-      title: preset.name,
-      value: UPDATE_PRESET_PREFIX + preset.name,
-      description: presetDescription(preset),
-    })),
+    [
+      lastAppliedRow(state),
+      ...state.presets.map((preset) => ({
+        title: preset.name,
+        value: UPDATE_PRESET_PREFIX + preset.name,
+        description: markedPresetDescription(state, preset),
+      })),
+    ],
     BACK_HINT,
   )
   if (!selected?.startsWith(UPDATE_PRESET_PREFIX)) return undefined
@@ -795,6 +818,22 @@ function presetDescription(preset: StoredPreset): string {
   const count = Object.keys(preset.assignments).length
   const saved = preset.savedAt ? ` — saved ${preset.savedAt.slice(0, 10)}` : ""
   return `${count} agent${count === 1 ? "" : "s"}${saved}`
+}
+
+function lastAppliedRow(state: WizardState): TuiDialogSelectOption<string> {
+  const name = state.lastAppliedPreset
+  const removed = name && state.presetStorageAvailable && !state.presets.some((preset) => preset.name === name)
+  return {
+    title: `Last applied preset: ${name ?? "unknown"}`,
+    value: LAST_APPLIED,
+    description: removed ? "No longer saved" : "Last applied by this plugin at the selected scope",
+    disabled: true,
+  }
+}
+
+function markedPresetDescription(state: WizardState, preset: StoredPreset): string {
+  const description = presetDescription(preset)
+  return preset.name === state.lastAppliedPreset ? `Last applied — ${description}` : description
 }
 
 function namedWriteUnavailableDescription(state: WizardState): string {
