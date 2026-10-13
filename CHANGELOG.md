@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.4.0](https://github.com/andresnator/opencode-agent-model-configurator/compare/v0.3.5...v0.4.0) (2026-10-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* **opencode:** migrate model presets to OpenCode V2 ([#33](https://github.com/andresnator/opencode-agent-model-configurator/issues/33))
+
+### Features
+
+* **opencode:** migrate model presets to OpenCode V2 ([#33](https://github.com/andresnator/opencode-agent-model-configurator/issues/33)) ([1fc2870](https://github.com/andresnator/opencode-agent-model-configurator/commit/1fc2870cfd0b3d4042be80a96446ad09f5ef4df6))
+
 ## [0.3.5](https://github.com/andresnator/opencode-agent-model-configurator/compare/v0.3.4...v0.3.5) (2026-10-01)
 
 
