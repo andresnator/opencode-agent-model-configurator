@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
+import struct
+import termios
 import os
 import pty
 import re
@@ -35,9 +38,11 @@ def main() -> int:
     args = parse_args()
     pid, descriptor = pty.fork()
     if pid == 0:
+        os.chdir(args.project)
+        fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
         os.execve(
             args.binary,
-            [args.binary, args.project, "--print-logs", "--log-level", "DEBUG"],
+            [args.binary, args.project, "--standalone", "--print-logs", "--log-level", "debug"],
             os.environ.copy(),
         )
 
@@ -70,14 +75,24 @@ def main() -> int:
                 break
     finally:
         Path(args.log).write_bytes(output)
+        os.close(descriptor)
         try:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-        try:
-            os.waitpid(pid, 0)
-        except ChildProcessError:
-            pass
+        # Closing the PTY before waiting is required for macOS to finish reaping OpenTUI.
+        cleanup_deadline = time.monotonic() + 5
+        while time.monotonic() < cleanup_deadline:
+            try:
+                reaped, _ = os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                break
+            if reaped:
+                break
+            time.sleep(0.05)
+        else:
+            print("FAIL isolated OpenCode process did not exit", file=sys.stderr)
+            return 1
 
     if success:
         print("PASS shouldOpenScopeDialogWhenSlashCommandRuns")

@@ -7,10 +7,6 @@
   "license": "MIT",
   "type": "module",
   "exports": {
-    ".": {
-      "types": "./dist/tui.d.ts",
-      "import": "./dist/tui.js"
-    },
     "./tui": {
       "types": "./dist/tui.d.ts",
       "import": "./dist/tui.js"
@@ -36,20 +32,19 @@
     "check": "pnpm run typecheck && pnpm run build && pnpm run test && pnpm run verify:workflows && pnpm run verify:package"
   },
   "engines": {
-    "node": "22.23.2",
-    "opencode": ">=1.17.15 <2"
+    "node": "26.4.0",
+    "opencode": ">=2.0.28 <3"
   },
   "devDependencies": {
-    "@opencode-ai/plugin": "1.18.21",
-    "@opentui/core": "0.5.7",
-    "@opentui/keymap": "0.5.7",
-    "@opentui/solid": "0.5.7",
+    "@opentui/core": "0.5.17",
+    "@opentui/solid": "0.5.17",
     "@types/node": "26.2.0",
     "esbuild": "0.28.2",
     "jsonc-parser": "3.3.1",
-    "solid-js": "1.9.15",
+    "solid-js": "1.9.12",
     "tsx": "4.23.12",
-    "typescript": "5.9.3"
+    "typescript": "5.9.3",
+    "@opencode/theme": "2.0.28"
   },
   "publishConfig": {
     "access": "public",
@@ -71,5 +66,8 @@
     "models",
     "presets",
     "variants"
-  ]
+  ],
+  "dependencies": {
+    "@opencode/plugin": "2.0.28"
+  }
 }

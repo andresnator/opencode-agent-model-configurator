@@ -1,45 +1,40 @@
-import type { TuiPlugin, TuiPluginModule } from "@opencode-ai/plugin/tui"
+import { Plugin } from "@opencode/plugin/tui"
 import { resolveProfilesRoot } from "./domain"
+import { createConfiguratorHost } from "./host"
 import { normalizePluginOptions } from "./options"
 import { runModelConfigurator } from "./wizard"
 
-export const MODELS_PRESETS_PLUGIN_ID = "models-presets"
+export const MODELS_PRESETS_PLUGIN_ID = "opencode-models-presets"
 export const MODELS_PRESETS_COMMAND_ID = "models-presets.open"
 export const MODELS_PRESETS_SLASH_NAME = "models-profiles"
-export const MINIMUM_OPENCODE_VERSION = "1.17.15"
+export const MINIMUM_OPENCODE_VERSION = "2.0.28"
 
-const tui: TuiPlugin = async (api, rawOptions) => {
-  const options = normalizePluginOptions(rawOptions)
-  // Registration never depends on installed data: agents come from the server and profiles are optional.
-  api.keymap.registerLayer({
-    commands: [
-      {
-        name: MODELS_PRESETS_COMMAND_ID,
-        title: "Configure model presets",
-        desc: "Assign models and variants by agent or reuse a saved preset",
-        category: "Model Presets",
-        namespace: "palette",
-        slashName: MODELS_PRESETS_SLASH_NAME,
-        run() {
-          void resolveProfilesRoot(import.meta.url, options.profilesDir, api.state.path.directory)
-            .then((profilesRoot) => runModelConfigurator(api, profilesRoot))
-            .catch((error) => {
-              api.ui.toast({
-                variant: "error",
-                title: "Model presets failed",
-                message: String(error instanceof Error ? error.message : error),
-                duration: 8000,
-              })
-            })
-        },
-      },
-    ],
-  })
-}
-
-const plugin: TuiPluginModule & { id: string } = {
+export default Plugin.define({
   id: MODELS_PRESETS_PLUGIN_ID,
-  tui,
-}
-
-export default plugin
+  setup(context) {
+    const options = normalizePluginOptions(context.options)
+    context.keymap.layer(() => ({
+      mode: "global",
+      commands: [{
+        id: MODELS_PRESETS_COMMAND_ID,
+        title: "Configure model presets",
+        description: "Assign models and variants by agent or reuse a saved preset",
+        group: "Model Presets",
+        palette: true,
+        slash: { name: MODELS_PRESETS_SLASH_NAME },
+        async run() {
+          try {
+            const host = createConfiguratorHost(context)
+            const profilesRoot = await resolveProfilesRoot(import.meta.url, options.profilesDir, host.paths.directory)
+            await runModelConfigurator(host, profilesRoot)
+          } catch (error) {
+            context.ui.toast.show({
+              variant: "error", title: "Model presets failed",
+              message: String(error instanceof Error ? error.message : error), duration: 8000,
+            })
+          }
+        },
+      }],
+    }))
+  },
+})

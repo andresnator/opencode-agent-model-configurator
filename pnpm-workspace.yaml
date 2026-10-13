@@ -4,9 +4,19 @@ packages:
 overrides:
   '@babel/core': 7.29.7
   'brace-expansion@2': 2.1.7
+  seroval: 1.6.3
 
 auditLevel: low
 minimumReleaseAge: 1440
+# Target the exact OpenCode release already installed; retain the age gate for other versions.
+minimumReleaseAgeExclude:
+  - '@opencode/ai@2.0.28'
+  - '@opencode/client@2.0.28'
+  - '@opencode/plugin@2.0.28'
+  - '@opencode/protocol@2.0.28'
+  - '@opencode/schema@2.0.28'
+  - '@opencode/theme@2.0.28'
+  - '@opencode/util@2.0.28'
 trustPolicy: no-downgrade
 # These exact versions pass npm's registry-signature audit but cannot be
 # compared reliably by pnpm's trust-history policy.
@@ -25,4 +35,4 @@ packageManagerStrict: true
 packageManagerStrictVersion: true
 verifyDepsBeforeRun: error
 engineStrict: true
-nodeVersion: 22.23.2
+nodeVersion: 26.4.0

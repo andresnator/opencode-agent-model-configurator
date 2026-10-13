@@ -7,6 +7,7 @@ await build({
   entryPoints: [new URL("../src/tui.tsx", import.meta.url).pathname],
   outfile: new URL("../dist/tui.js", import.meta.url).pathname,
   bundle: true,
+  external: ["@opencode/plugin/tui"],
   format: "esm",
   platform: "node",
   target: "es2022",

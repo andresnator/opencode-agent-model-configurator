@@ -4,7 +4,7 @@ Find the symptom you can see and follow its first action.
 
 | Symptom | First action |
 | --- | --- |
-| Plugin or command is missing | Check the npm entry in `tui.json`, then restart OpenCode |
+| Plugin or command is missing | Check the npm entry in `cli.json`, then restart OpenCode |
 | Agent, provider, model, or variant is missing | Refresh the live OpenCode catalog |
 | Profile or preset is missing | Read the warning before editing stored data |
 | Configuration changed or cannot be written | Keep the current file, fix the cause, and reopen the plugin |
@@ -14,19 +14,19 @@ Normal behavior is described in [Configuration](configuration.md).
 
 ## The plugin does not load
 
-1. Open the `tui.json` used by OpenCode.
-2. Confirm that exactly one string or tuple uses the npm spec `opencode-models-presets` or `opencode-models-presets@<version>`.
+1. Open the `cli.json` used by OpenCode.
+2. Confirm that exactly one string or package object uses the npm spec `opencode-models-presets` or `opencode-models-presets@<version>`.
 3. If the entry pins a version, confirm that the release exists and supports your OpenCode version.
 4. Restart OpenCode and try **Configure model presets** or `/models-profiles`.
-5. If the entry is absent or invalid, repeat the [installation](../README.md#quick-start).
+5. If the entry is absent or invalid, repeat the [installation](../README.md#install).
 
 The README is the only source for installation commands.
 
 ## Update the plugin
 
 - For normal updates, keep the bare `"opencode-models-presets"` entry and restart OpenCode. Bare npm specs follow `latest` and can refresh when the cached package is stale.
-- For a pinned install, change only the version in the matching `tui.json` entry, for example from `opencode-models-presets@0.3.1` to a newer stable release.
-- If the entry is a tuple, preserve its options object.
+- For a pinned install, change only the version in the matching `cli.json` entry, for example from `opencode-models-presets@<version>` to a newer stable release.
+- If the entry is an object, preserve its `options` field.
 
 Do not edit unrelated entries or use `npm install -g`.
 
@@ -85,9 +85,9 @@ If a write started and failed, the plugin restores the previous configuration. A
 
 ## Changes were written but are not active
 
-If the completion message says **Restart required**, restart every affected OpenCode session. Global removal-only changes also require a restart.
+If the completion message says **Restart required**, restart every affected OpenCode session. Reload failures leave the file saved and require a restart.
 
-If it says **Applied live**, only the current server was updated. Restart other running OpenCode processes.
+If it says **Applied live**, all loaded locations on the connected server were reloaded. Other servers need a reload.
 
 If a restart still shows the old value, check [environment overrides](#environment-values-override-file-changes).
 
@@ -96,8 +96,8 @@ If a restart still shows the old value, check [environment overrides](#environme
 First remove the registration:
 
 1. Close OpenCode sessions that use the plugin.
-2. Open `tui.json`.
-3. Remove only the string or tuple whose npm spec is `opencode-models-presets` or `opencode-models-presets@<version>`.
+2. Open `cli.json`.
+3. Remove only the string or package object whose npm spec is `opencode-models-presets` or `opencode-models-presets@<version>`.
 4. Keep every other plugin entry and option.
 5. Restart OpenCode and confirm that the Models Presets entry points are gone.
 

@@ -1,9 +1,12 @@
+// src/tui.tsx
+import { Plugin } from "@opencode/plugin/tui";
+
 // src/domain.ts
 import { readdir, readFile, realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-var AGENT_LIST_ERROR = "This OpenCode server did not return an agent list (GET /agent). Update OpenCode and retry.";
+var AGENT_LIST_ERROR = "This OpenCode server did not return an agent list (GET /api/agent). Update OpenCode and retry.";
 async function resolveProfilesRoot(moduleUrl, configuredProfilesDir, baseDirectory = process.cwd()) {
   if (configuredProfilesDir) {
     if (configuredProfilesDir.startsWith("file://")) return fileURLToPath(configuredProfilesDir);
@@ -23,11 +26,11 @@ function normalizeLiveAgents(result) {
   for (const entry of root) {
     if (!isRecord(entry) || typeof entry.name !== "string" || entry.name.length === 0) continue;
     const agent = {
-      name: entry.name,
+      name: typeof entry.id === "string" && entry.id.length > 0 ? entry.id : entry.name,
       mode: entry.mode === "primary" || entry.mode === "all" ? entry.mode : "subagent",
       native: entry.native === true,
       hidden: entry.hidden === true,
-      taskRules: normalizeTaskRules(entry.permission)
+      taskRules: normalizeTaskRules(entry.permissions ?? entry.permission)
     };
     if (typeof entry.description === "string" && entry.description.length > 0) agent.description = entry.description;
     byName.set(agent.name, agent);
@@ -146,14 +149,18 @@ function validateProfile(raw, agents) {
     warnings
   };
 }
-function normalizeProviderCatalog(result) {
+function normalizeModelCatalog(result) {
   const root = isRecord(result) && "data" in result ? result.data : result;
-  if (!isRecord(root)) return [];
-  const connected = new Set(
-    Array.isArray(root.connected) ? root.connected.filter((provider) => typeof provider === "string") : []
-  );
-  const providers = Array.isArray(root.all) ? root.all : [];
-  return providers.filter(isRecord).filter((provider) => typeof provider.id === "string" && connected.has(provider.id)).map((provider) => ({ id: provider.id, models: normalizeModels(provider.models) })).filter((provider) => provider.models.length > 0).sort((left, right) => left.id.localeCompare(right.id));
+  if (!Array.isArray(root)) throw new Error("This OpenCode server did not return a model catalog (GET /api/model).");
+  const providers = /* @__PURE__ */ new Map();
+  for (const model of root) {
+    if (!isRecord(model) || model.enabled !== true || typeof model.id !== "string" || typeof model.providerID !== "string") continue;
+    const variants = Array.isArray(model.variants) ? model.variants.filter(isRecord).map((variant) => variant.id).filter((id) => typeof id === "string").sort() : [];
+    const models = providers.get(model.providerID) ?? [];
+    models.push({ id: model.id, variants });
+    providers.set(model.providerID, models);
+  }
+  return [...providers].sort(([left], [right]) => left.localeCompare(right)).map(([id, models]) => ({ id, models: models.sort((left, right) => left.id.localeCompare(right.id)) }));
 }
 function flattenModels(providers) {
   return providers.flatMap(
@@ -179,10 +186,14 @@ function normalizeTaskRules(raw) {
   if (!Array.isArray(raw)) return [];
   const rules = [];
   for (const rule of raw) {
-    if (!isRecord(rule) || typeof rule.permission !== "string" || typeof rule.pattern !== "string") continue;
-    if (!wildcardMatch("task", rule.permission)) continue;
-    if (rule.action !== "allow" && rule.action !== "deny" && rule.action !== "ask") continue;
-    rules.push({ pattern: rule.pattern, action: rule.action });
+    if (!isRecord(rule)) continue;
+    const native = typeof rule.resource === "string" && typeof rule.effect === "string";
+    const action = native ? rule.action : rule.permission;
+    const resource = native ? rule.resource : rule.pattern;
+    const effect = native ? rule.effect : rule.action;
+    if (typeof action !== "string" || typeof resource !== "string" || !wildcardMatch(native ? "subagent" : "task", action)) continue;
+    if (effect !== "allow" && effect !== "deny" && effect !== "ask") continue;
+    rules.push({ pattern: resource, action: effect });
   }
   return rules;
 }
@@ -199,15 +210,6 @@ function isMissingPath(error) {
   const code = isRecord(error) ? error.code : void 0;
   return code === "ENOENT" || code === "ENOTDIR";
 }
-function normalizeModels(raw) {
-  const entries = Array.isArray(raw) ? raw.filter(isRecord).map((model) => [model.id, model]) : isRecord(raw) ? Object.entries(raw) : [];
-  return entries.filter((entry) => typeof entry[0] === "string" && isRecord(entry[1])).map(([id, model]) => ({ id, variants: normalizeVariants(model.variants) })).sort((left, right) => left.id.localeCompare(right.id));
-}
-function normalizeVariants(raw) {
-  if (Array.isArray(raw)) return raw.filter((variant) => typeof variant === "string").sort();
-  if (isRecord(raw)) return Object.keys(raw).sort();
-  return [];
-}
 function normalizeMapping(mapping) {
   if (!mapping?.model) return {};
   return mapping.variant ? { model: mapping.model, variant: mapping.variant } : { model: mapping.model };
@@ -217,6 +219,24 @@ function sameMapping(left, right) {
 }
 function isRecord(value) {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// src/host.ts
+import { homedir as homedir2 } from "node:os";
+import path2 from "node:path";
+function createConfiguratorHost(context) {
+  const location = context.location ?? context.data.location.default();
+  if (!location.directory) throw new Error("OpenCode has no active project directory. Open a project and retry.");
+  return {
+    paths: {
+      directory: location.directory,
+      worktree: location.directory,
+      // V2 Global.Service applies OPENCODE_CONFIG_DIR over the standard XDG root.
+      config: process.env.OPENCODE_CONFIG_DIR || path2.join(process.env.XDG_CONFIG_HOME || path2.join(homedir2(), ".config"), "opencode")
+    },
+    client: context.client,
+    ui: context.ui
+  };
 }
 
 // src/options.ts
@@ -232,8 +252,8 @@ function isRecord2(value) {
 // src/persistence.ts
 import { randomBytes } from "node:crypto";
 import { link, mkdir, open, readFile as readFile2, rm, rmdir, stat } from "node:fs/promises";
-import { homedir as homedir2 } from "node:os";
-import path2 from "node:path";
+import { homedir as homedir3 } from "node:os";
+import path3 from "node:path";
 
 // node_modules/.pnpm/jsonc-parser@3.3.1/node_modules/jsonc-parser/lib/esm/impl/scanner.js
 function createScanner(text, ignoreTrivia = false) {
@@ -1031,12 +1051,12 @@ function parseTree(text, errors = [], options = ParseOptions.DEFAULT) {
   }
   return result;
 }
-function findNodeAtLocation(root, path5) {
+function findNodeAtLocation(root, path6) {
   if (!root) {
     return void 0;
   }
   let node = root;
-  for (let segment of path5) {
+  for (let segment of path6) {
     if (typeof segment === "string") {
       if (node.type !== "object" || !Array.isArray(node.children)) {
         return void 0;
@@ -1390,14 +1410,14 @@ function getNodeType(value) {
 
 // node_modules/.pnpm/jsonc-parser@3.3.1/node_modules/jsonc-parser/lib/esm/impl/edit.js
 function setProperty(text, originalPath, value, options) {
-  const path5 = originalPath.slice();
+  const path6 = originalPath.slice();
   const errors = [];
   const root = parseTree(text, errors);
   let parent = void 0;
   let lastSegment = void 0;
-  while (path5.length > 0) {
-    lastSegment = path5.pop();
-    parent = findNodeAtLocation(root, path5);
+  while (path6.length > 0) {
+    lastSegment = path6.pop();
+    parent = findNodeAtLocation(root, path6);
     if (parent === void 0 && value !== void 0) {
       if (typeof lastSegment === "string") {
         value = { [lastSegment]: value };
@@ -1620,8 +1640,8 @@ function printParseErrorCode(code) {
   }
   return "<unknown ParseErrorCode>";
 }
-function modify(text, path5, value, options) {
-  return setProperty(text, path5, value, options);
+function modify(text, path6, value, options) {
+  return setProperty(text, path6, value, options);
 }
 function applyEdits(text, edits) {
   let sortedEdits = edits.slice(0).sort((a, b) => {
@@ -1656,8 +1676,8 @@ var ConfigWriteConflictError = class extends Error {
 };
 async function resolveConfigFile(scope, runtime) {
   const root = scope === "global" ? globalConfigRoot(runtime) : projectConfigRoot(runtime);
-  const jsonc = path2.join(root, CONFIG_JSONC);
-  const json = path2.join(root, CONFIG_JSON);
+  const jsonc = path3.join(root, CONFIG_JSONC);
+  const json = path3.join(root, CONFIG_JSON);
   if (await exists(jsonc)) return jsonc;
   if (await exists(json)) return json;
   return json;
@@ -1682,124 +1702,49 @@ async function readConfigSnapshot(file) {
 function renderConfigChanges(snapshot, changes) {
   let content = snapshot.content;
   for (const change of changes) {
+    const config = parseConfig(content, snapshot.file);
     if (change.action === "inherit") {
-      content = edit(content, ["agent", change.agent, "model"], void 0);
-      content = edit(content, ["agent", change.agent, "variant"], void 0);
-      const parsed2 = parseConfig(content, snapshot.file);
-      const agent = isRecord3(parsed2.agent) && isRecord3(parsed2.agent[change.agent]) ? parsed2.agent[change.agent] : void 0;
-      if (agent && Object.keys(agent).length === 0) content = edit(content, ["agent", change.agent], void 0);
+      for (const container of ["agent", "agents"]) {
+        const entries = config[container];
+        if (!isRecord3(entries) || !isRecord3(entries[change.agent])) continue;
+        content = edit(content, [container, change.agent, "model"], void 0);
+        if (container === "agent") content = edit(content, [container, change.agent, "variant"], void 0);
+        const updated = parseConfig(content, snapshot.file)[container];
+        const entry = isRecord3(updated) ? updated[change.agent] : void 0;
+        if (isRecord3(entry) && Object.keys(entry).length === 0) {
+          content = edit(content, [container, change.agent], void 0);
+        }
+      }
     } else {
-      content = edit(content, ["agent", change.agent, "model"], change.after.model);
-      content = edit(content, ["agent", change.agent, "variant"], change.after.variant);
+      const legacyEntry = isRecord3(config.agent) && isRecord3(config.agent[change.agent]);
+      const nativeEntry = isRecord3(config.agents) && isRecord3(config.agents[change.agent]);
+      const native = nativeEntry || !legacyEntry && (isRecord3(config.agents) || !isRecord3(config.agent));
+      if (native) {
+        const model = change.after.model;
+        if (!model || model.indexOf("/") < 1) throw new Error(`Invalid model assignment: ${model}`);
+        const separator = model.indexOf("/");
+        const value = {
+          providerID: model.slice(0, separator),
+          model: model.slice(separator + 1),
+          ...change.after.variant ? { variant: change.after.variant } : {}
+        };
+        content = edit(content, ["agents", change.agent, "model"], value);
+      } else {
+        content = edit(content, ["agent", change.agent, "model"], change.after.model);
+        content = edit(content, ["agent", change.agent, "variant"], change.after.variant);
+      }
     }
   }
   const parsed = parseConfig(content, snapshot.file);
-  if (isRecord3(parsed.agent) && Object.keys(parsed.agent).length === 0) content = edit(content, ["agent"], void 0);
+  for (const container of ["agent", "agents"]) {
+    if (isRecord3(parsed[container]) && Object.keys(parsed[container]).length === 0) content = edit(content, [container], void 0);
+  }
   parseConfig(content, snapshot.file);
   return content;
 }
 async function writeConfigChanges(snapshot, changes, hooks = {}, options = {}) {
   const written = await writeConfigChangesInternal(snapshot, changes, hooks, { forceWrite: options.force });
   return written.result;
-}
-async function writeConfigChangesWithOwnership(snapshot, changes, hooks = {}) {
-  const written = await writeConfigChangesInternal(snapshot, changes, hooks, { retainOwnership: true });
-  return written.ownership;
-}
-async function writeConfigChangesFromOwnership(ownership, changes, hooks = {}) {
-  const state = activeOwnership(ownership);
-  const snapshot = { ...state.snapshot, exists: true, content: state.content, mode: state.mode };
-  const written = await writeConfigChangesInternal(snapshot, changes, hooks, {
-    expectedOwnership: ownership,
-    retainOwnership: true
-  });
-  if (written.ownership) await transferConfigWriteOwnership(ownership, written.ownership);
-  return written.result;
-}
-async function releaseConfigWriteOwnership(ownership) {
-  const state = ownership[CONFIG_WRITE_OWNERSHIP];
-  if (!state.active) return;
-  if (!await retainedClaimMatchesSnapshot(state)) {
-    const claimRecovered = await preserveChangedRetainedClaim(ownership);
-    await discardConfigWriteOwnership(ownership);
-    if (claimRecovered) throw configWriteConflict(state.snapshot);
-    return;
-  }
-  await discardConfigWriteOwnership(ownership);
-}
-async function restoreOwnedConfigSnapshot(ownership) {
-  const state = activeOwnership(ownership);
-  const { snapshot, artifacts, artifactOwnership } = state;
-  const conflictMessage = `${snapshot.file} rollback conflict: configuration changed after the plugin write; preserving newer content`;
-  let conflict = false;
-  let publicationMoved = false;
-  let restorationMatchesSnapshot = true;
-  if (snapshot.exists) {
-    try {
-      const restorationIdentity = await reserveArtifactLink(
-        artifacts.claim,
-        artifacts.restoration,
-        artifactOwnership,
-        "restoration"
-      );
-      const claimIdentity = artifactOwnership.identities.claim;
-      restorationMatchesSnapshot = Boolean(
-        claimIdentity && sameIdentity(restorationIdentity, claimIdentity) && await matchesSnapshot(artifacts.restoration, snapshot, state.mode)
-      );
-    } catch (error) {
-      await closeConfigWriteOwnership(ownership);
-      if (isMissing(error)) throw configWriteConflict(snapshot, conflictMessage);
-      throw error;
-    }
-  }
-  try {
-    const recoveryIdentity = await reserveArtifactLink(snapshot.file, artifacts.recovery, artifactOwnership, "recovery");
-    if (!await removePathWithIdentity(snapshot.file, recoveryIdentity)) {
-      artifactOwnership.preserved.add("recovery");
-      throw new Error(`${snapshot.file} recovery found multiple concurrent edits; preserving ${artifacts.recovery}`);
-    }
-    publicationMoved = true;
-  } catch (error) {
-    if (!isMissing(error)) {
-      await closeConfigWriteOwnership(ownership);
-      throw error;
-    }
-    await closeConfigWriteOwnership(ownership);
-    throw configWriteConflict(snapshot, conflictMessage);
-  }
-  try {
-    if (!await ownershipPublicationMatchesFile(state, artifacts.recovery)) {
-      await restorePreservedArtifact(artifacts, artifactOwnership, "recovery", snapshot.file);
-      conflict = true;
-    } else if (snapshot.exists) {
-      const restored = restorationMatchesSnapshot ? await restoreWithoutClobber(artifacts.restoration, snapshot.file, false) : await restorePreservedArtifact(artifacts, artifactOwnership, "restoration", snapshot.file);
-      conflict = !restorationMatchesSnapshot || !restored;
-    } else {
-      conflict = await exists(snapshot.file);
-    }
-  } catch (error) {
-    let publicationRecoveryError;
-    if (publicationMoved) {
-      try {
-        await restorePreservedArtifact(artifacts, artifactOwnership, "recovery", snapshot.file);
-      } catch (recoveryError) {
-        publicationRecoveryError = recoveryError;
-      }
-    }
-    await closeConfigWriteOwnership(ownership);
-    if (publicationRecoveryError) {
-      throw new AggregateError(
-        [error, publicationRecoveryError],
-        `${snapshot.file} rollback failed while preserving concurrent lineages`
-      );
-    }
-    throw error;
-  }
-  await closeConfigWriteOwnership(ownership);
-  if (conflict) throw configWriteConflict(snapshot, conflictMessage);
-}
-function isConfigWriteConflictError(error) {
-  return error instanceof ConfigWriteConflictError;
 }
 async function writeConfigChangesInternal(snapshot, changes, hooks, options = {}) {
   if (changes.length === 0 && !options.forceWrite) {
@@ -1815,7 +1760,7 @@ async function writeConfigChangesInternal(snapshot, changes, hooks, options = {}
 }
 async function writeConfigContent(snapshot, rendered, hooks = {}, options = {}) {
   const { conflictMessage, expectedOwnership, retainOwnership = false } = options;
-  const directory = path2.dirname(snapshot.file);
+  const directory = path3.dirname(snapshot.file);
   await mkdir(directory, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
   await requireExpectedOwnership(snapshot, options);
   if (snapshot.exists) {
@@ -1834,10 +1779,10 @@ async function writeConfigContent(snapshot, rendered, hooks = {}, options = {}) 
   const operationDirectory = `${snapshot.file}.${suffix}.write`;
   const artifacts = {
     directory: operationDirectory,
-    temporary: path2.join(operationDirectory, "temporary"),
-    claim: path2.join(operationDirectory, "claim"),
-    restoration: path2.join(operationDirectory, "restoration"),
-    recovery: path2.join(operationDirectory, "recovery")
+    temporary: path3.join(operationDirectory, "temporary"),
+    claim: path3.join(operationDirectory, "claim"),
+    restoration: path3.join(operationDirectory, "restoration"),
+    recovery: path3.join(operationDirectory, "recovery")
   };
   const state = {
     destinationClaimed: false,
@@ -1980,37 +1925,6 @@ function activeOwnership(ownership) {
   if (!state.active) throw new Error(`${ownership.file} write ownership is no longer active`);
   return state;
 }
-async function transferConfigWriteOwnership(ownership, replacement) {
-  const current = activeOwnership(ownership);
-  const next = activeOwnership(replacement);
-  const nextClaimIdentity = next.artifactOwnership.identities.claim;
-  if (!nextClaimIdentity || !await removePathWithIdentity(next.artifacts.claim, nextClaimIdentity)) {
-    throw new Error(`${ownership.file} fallback ownership claim could not be transferred`);
-  }
-  delete next.artifactOwnership.identities.claim;
-  if (current.snapshot.exists) {
-    if (!await retainedClaimMatchesSnapshot(current)) throw configWriteConflict(current.snapshot);
-    const transferredClaimIdentity = await reserveArtifactLink(
-      current.artifacts.claim,
-      next.artifacts.claim,
-      next.artifactOwnership,
-      "claim"
-    );
-    const currentClaimIdentity = current.artifactOwnership.identities.claim;
-    if (!currentClaimIdentity || !sameIdentity(transferredClaimIdentity, currentClaimIdentity) || !await matchesSnapshot(next.artifacts.claim, current.snapshot, current.mode)) {
-      throw configWriteConflict(current.snapshot);
-    }
-  }
-  const originalSnapshot = current.snapshot;
-  await cleanupWriteArtifacts(current.artifacts, current.artifactOwnership);
-  current.snapshot = originalSnapshot;
-  current.content = next.content;
-  current.mode = next.mode;
-  current.artifacts = next.artifacts;
-  current.artifactOwnership = next.artifactOwnership;
-  next.active = false;
-  await syncDirectory(path2.dirname(ownership.file));
-}
 async function requireExpectedOwnership(snapshot, options) {
   if (!options.expectedOwnership) return;
   if (!await ownershipMatchesFile(options.expectedOwnership, snapshot.file)) {
@@ -2043,83 +1957,6 @@ async function retainedClaimMatchesSnapshot(state) {
     if (isMissing(error)) return false;
     throw error;
   }
-}
-async function preserveChangedRetainedClaim(ownership) {
-  const state = activeOwnership(ownership);
-  const { artifacts, artifactOwnership } = state;
-  if (await retainedClaimMatchesSnapshot(state)) return false;
-  if (await haveSameIdentity(artifacts.claim, ownership.file)) return true;
-  try {
-    await reserveArtifactLink(artifacts.claim, artifacts.restoration, artifactOwnership, "restoration");
-  } catch (error) {
-    await closeConfigWriteOwnership(ownership);
-    if (isMissing(error)) throw configWriteConflict(state.snapshot);
-    throw error;
-  }
-  let publicationMoved = false;
-  try {
-    const recoveryIdentity = await reserveArtifactLink(ownership.file, artifacts.recovery, artifactOwnership, "recovery");
-    publicationMoved = await removePathWithIdentity(ownership.file, recoveryIdentity);
-    if (!publicationMoved) artifactOwnership.preserved.add("recovery");
-  } catch (error) {
-    artifactOwnership.preserved.add("restoration");
-    await closeConfigWriteOwnership(ownership);
-    if (isMissing(error)) throw configWriteConflict(state.snapshot);
-    throw error;
-  }
-  try {
-    if (!publicationMoved) {
-      artifactOwnership.preserved.add("restoration");
-      throw new Error(`${ownership.file} recovery found multiple concurrent edits; preserving ${artifacts.recovery}`);
-    }
-    if (!await ownershipPublicationMatchesFile(state, artifacts.recovery)) {
-      await restorePreservedArtifact(artifacts, artifactOwnership, "recovery", ownership.file);
-      artifactOwnership.preserved.add("restoration");
-      throw new Error(`${ownership.file} recovery found multiple concurrent edits; preserving ${artifacts.restoration}`);
-    }
-    await restorePreservedArtifact(artifacts, artifactOwnership, "restoration", ownership.file);
-    await syncFile(ownership.file);
-    await syncDirectory(path2.dirname(ownership.file));
-    return true;
-  } catch (error) {
-    let publicationRecoveryError;
-    if (publicationMoved) {
-      try {
-        await restorePreservedArtifact(artifacts, artifactOwnership, "recovery", ownership.file);
-      } catch (recoveryError) {
-        publicationRecoveryError = recoveryError;
-      }
-    }
-    if (!await haveSameIdentity(artifacts.restoration, ownership.file)) {
-      artifactOwnership.preserved.add("restoration");
-    }
-    await closeConfigWriteOwnership(ownership);
-    if (publicationRecoveryError) {
-      throw new AggregateError(
-        [error, publicationRecoveryError],
-        `${ownership.file} ownership release failed while preserving concurrent lineages`
-      );
-    }
-    throw error;
-  }
-}
-async function discardConfigWriteOwnership(ownership) {
-  const state = activeOwnership(ownership);
-  if (!await retainedClaimCanBeRemoved(state, ownership.file)) {
-    throw new Error(`${ownership.file} retained claim changed; preserving it for recovery`);
-  }
-  await cleanupWriteArtifacts(state.artifacts, state.artifactOwnership);
-  state.active = false;
-  await syncDirectory(path2.dirname(ownership.file));
-}
-async function closeConfigWriteOwnership(ownership) {
-  const state = activeOwnership(ownership);
-  await cleanupWriteArtifacts(state.artifacts, state.artifactOwnership);
-  state.active = false;
-  await syncDirectory(path2.dirname(ownership.file));
-}
-async function retainedClaimCanBeRemoved(state, destination) {
-  return await retainedClaimMatchesSnapshot(state) || haveSameIdentity(state.artifacts.claim, destination);
 }
 async function recoverConfigWrite(snapshot, rendered, mode, artifacts, artifactOwnership, state, hooks) {
   if (state.destinationPublished) {
@@ -2260,33 +2097,38 @@ function higherPrecedenceWarning() {
 function globalConfigRoot(runtime) {
   if (runtime.config) return runtime.config;
   const xdgConfig = process.env.XDG_CONFIG_HOME;
-  return path2.join(xdgConfig || path2.join(homedir2(), ".config"), "opencode");
+  return path3.join(xdgConfig || path3.join(homedir3(), ".config"), "opencode");
 }
 function projectConfigRoot(runtime) {
   const root = runtime.worktree && runtime.worktree !== "/" ? runtime.worktree : runtime.directory;
-  return path2.join(root, ".opencode");
+  return path3.join(root, ".opencode");
 }
 function displayConfigFile(scope, file, runtime) {
   if (scope === "project") {
-    const projectRoot = path2.dirname(projectConfigRoot(runtime));
-    const relative = path2.relative(projectRoot, file);
+    const projectRoot = path3.dirname(projectConfigRoot(runtime));
+    const relative = path3.relative(projectRoot, file);
     return relative.startsWith("..") ? file : relative;
   }
-  const home = homedir2();
+  const home = homedir3();
   if (file === home) return "~";
-  if (file.startsWith(`${home}${path2.sep}`)) return `~${file.slice(home.length)}`;
+  if (file.startsWith(`${home}${path3.sep}`)) return `~${file.slice(home.length)}`;
   return file;
 }
 function extractMappings(config) {
-  if (!isRecord3(config.agent)) return {};
-  const mappings = {};
-  for (const [agent, value] of Object.entries(config.agent)) {
-    if (!isRecord3(value)) continue;
-    const model = typeof value.model === "string" ? value.model : void 0;
-    const variant = typeof value.variant === "string" ? value.variant : void 0;
-    mappings[agent] = { model, variant };
+  const mappings = /* @__PURE__ */ Object.create(null);
+  for (const container of ["agent", "agents"]) {
+    if (!isRecord3(config[container])) continue;
+    for (const [agent, value] of Object.entries(config[container])) {
+      if (!isRecord3(value)) continue;
+      if (container === "agents" && isRecord3(value.model)) {
+        const model = typeof value.model.providerID === "string" && typeof value.model.model === "string" ? `${value.model.providerID}/${value.model.model}` : void 0;
+        mappings[agent] = { model, variant: typeof value.model.variant === "string" ? value.model.variant : void 0 };
+      } else {
+        mappings[agent] = { model: typeof value.model === "string" ? value.model : void 0, variant: container === "agent" && typeof value.variant === "string" ? value.variant : void 0 };
+      }
+    }
   }
-  return mappings;
+  return Object.assign({}, mappings);
 }
 function edit(content, jsonPath, value) {
   return applyEdits(content, modify(content, jsonPath, value, { formattingOptions: FORMATTING_OPTIONS }));
@@ -2343,128 +2185,25 @@ function isDirectoryNotEmpty(error) {
 }
 
 // src/hot-apply.ts
-async function applyConfigChanges(client, scope, runtime, snapshot, changes, hooks = {}, options = {}) {
-  if (scope === "project") {
-    const result = await writeConfigChanges(snapshot, changes, hooks, { force: options.forceWrite });
-    const hot = await disposeProjectInstance(client, runtime);
-    return outcome(result.file, hot);
-  }
-  const plan = planGlobalHotApply(changes);
-  if (plan.strategy === "write-only") {
-    const result = await writeConfigChanges(snapshot, changes, hooks, { force: options.forceWrite });
-    return { file: result.file, hotApplied: false, detail: plan.reason };
-  }
-  const ownership = await writeConfigChangesWithOwnership(snapshot, plan.preludeChanges, hooks);
-  let applyCompleted = false;
-  try {
-    const hot = await patchGlobalConfig(client, plan.patch);
-    if (hot.applied) {
-      applyCompleted = true;
-      if (ownership) await releaseConfigWriteOwnership(ownership);
-      return { file: snapshot.file, hotApplied: true };
-    }
-    const result = ownership ? await writeConfigChangesFromOwnership(ownership, plan.fallbackChanges, hooks) : await writeConfigChanges(snapshot, plan.fallbackChanges, hooks);
-    if (ownership) await hooks.before?.("ownership-release");
-    applyCompleted = true;
-    if (ownership) await releaseConfigWriteOwnership(ownership);
-    return outcome(result.file, hot);
-  } catch (error) {
-    if (!ownership || applyCompleted) throw error;
-    if (isConfigWriteConflictError(error)) {
-      try {
-        await releaseConfigWriteOwnership(ownership);
-      } catch (cleanupError) {
-        if (isConfigWriteConflictError(cleanupError)) throw error;
-        throw new AggregateError(
-          [error, cleanupError],
-          `${snapshot.file} apply failed and operation-owned artifacts could not be cleaned`
-        );
-      }
-      throw error;
-    }
-    try {
-      await restoreOwnedConfigSnapshot(ownership);
-    } catch (rollbackError) {
-      throw new AggregateError(
-        [error, rollbackError],
-        `${snapshot.file} apply failed and the original snapshot could not be restored`
-      );
-    }
-    throw error;
-  }
-}
-function planGlobalHotApply(changes) {
-  const sets = changes.filter((change) => change.action === "set" && change.after.model !== void 0);
-  const effective = sets.some(
-    (change) => change.after.model !== change.before.model || change.after.variant !== void 0 && change.after.variant !== change.before.variant
-  );
-  if (!effective) {
-    return { strategy: "write-only", reason: "removal-only changes cannot be hot-applied at global scope" };
-  }
-  const preludeChanges = changes.filter((change) => change.action === "inherit");
-  for (const change of sets) {
-    if (change.before.variant === void 0 || change.after.variant !== void 0 || change.before.model === void 0) continue;
-    preludeChanges.push({ agent: change.agent, before: change.before, after: { model: change.before.model }, action: "set" });
-  }
-  const agent = {};
-  for (const change of sets) {
-    const model = change.after.model;
-    if (model === void 0) continue;
-    agent[change.agent] = change.after.variant === void 0 ? { model } : { model, variant: change.after.variant };
-  }
-  return { strategy: "patch", preludeChanges, patch: { agent }, fallbackChanges: sets };
-}
-async function disposeProjectInstance(client, runtime) {
-  const instance = asHotApplyClient(client)?.instance;
-  if (typeof instance?.dispose !== "function") {
-    return { applied: false, reason: "this OpenCode client does not expose instance disposal" };
-  }
-  const directory = runtime.directory || runtime.worktree;
-  if (!directory) return { applied: false, reason: "the project instance directory is unknown" };
-  try {
-    const result = await instance.dispose({ directory });
-    if (result?.error !== void 0 || result?.data !== true) {
-      return { applied: false, reason: rejectionReason("instance disposal", result) };
-    }
-    return { applied: true };
-  } catch (error) {
-    return { applied: false, reason: errorReason(error) };
-  }
-}
-async function patchGlobalConfig(client, patch) {
-  const config = asHotApplyClient(client)?.global?.config;
-  if (typeof config?.update !== "function") {
-    return { applied: false, reason: "this OpenCode client does not expose the global config route" };
+async function applyConfigChanges(client, _scope, _runtime, snapshot, changes, hooks = {}, options = {}) {
+  const result = await writeConfigChanges(snapshot, changes, hooks, { force: options.forceWrite });
+  const location = client?.location;
+  if (typeof location?.reload !== "function") {
+    return { file: result.file, hotApplied: false, detail: "this OpenCode client does not expose configuration reload" };
   }
   try {
-    const result = await config.update({ config: patch });
-    if (result?.error !== void 0 || result?.data === void 0) {
-      return { applied: false, reason: rejectionReason("global config update", result) };
-    }
-    return { applied: true };
+    await location.reload();
+    return { file: result.file, hotApplied: true };
   } catch (error) {
-    return { applied: false, reason: errorReason(error) };
+    return { file: result.file, hotApplied: false, detail: error instanceof Error ? error.message : String(error) };
   }
-}
-function outcome(file, hot) {
-  return hot.applied ? { file, hotApplied: true } : { file, hotApplied: false, detail: hot.reason };
-}
-function asHotApplyClient(client) {
-  return typeof client === "object" && client !== null ? client : void 0;
-}
-function rejectionReason(operation, result) {
-  const status = result?.response?.status;
-  return typeof status === "number" ? `${operation} failed with status ${status}` : `${operation} was rejected`;
-}
-function errorReason(error) {
-  return error instanceof Error ? error.message : "unknown hot-apply error";
 }
 
 // src/last-applied.ts
 import { randomUUID } from "node:crypto";
 import { mkdir as mkdir2, open as open2, readFile as readFile3, readdir as readdir2, rename, rm as rm2, rmdir as rmdir2, unlink, writeFile } from "node:fs/promises";
 import { hostname } from "node:os";
-import path3 from "node:path";
+import path4 from "node:path";
 import { TextDecoder } from "node:util";
 var HISTORY_FILE = "model-configurator-last-applied.json";
 var HISTORY_VERSION = 1;
@@ -2473,21 +2212,21 @@ var PRIVATE_DIRECTORY_MODE2 = 448;
 var LOCK_ATTEMPTS = 3;
 var FATAL_UTF8_DECODER = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 function lastAppliedFile(runtime) {
-  return path3.join(globalConfigRoot(runtime), HISTORY_FILE);
+  return path4.join(globalConfigRoot(runtime), HISTORY_FILE);
 }
 async function loadLastApplied(file, configFile) {
-  return (await readHistory(file))[path3.resolve(configFile)];
+  return (await readHistory(file))[path4.resolve(configFile)];
 }
 async function saveLastApplied(file, configFile, name) {
   if (!name.trim()) throw new Error("Last applied preset name cannot be empty.");
-  await mkdir2(path3.dirname(file), { recursive: true, mode: PRIVATE_DIRECTORY_MODE2 });
+  await mkdir2(path4.dirname(file), { recursive: true, mode: PRIVATE_DIRECTORY_MODE2 });
   const lock = `${file}.lock`;
   const owner = await acquireLock(lock);
   const temporary = `${file}.${randomUUID()}.tmp`;
   let temporaryOwned = false;
   try {
     const lastApplied = await readHistory(file);
-    lastApplied[path3.resolve(configFile)] = name;
+    lastApplied[path4.resolve(configFile)] = name;
     const handle = await open2(temporary, "wx", PRIVATE_FILE_MODE);
     temporaryOwned = true;
     try {
@@ -2512,7 +2251,7 @@ async function acquireLock(lock) {
   const prepared = `${lock}.${randomUUID()}.pending`;
   await mkdir2(prepared, { mode: PRIVATE_DIRECTORY_MODE2 });
   try {
-    await writeFile(path3.join(prepared, owner), JSON.stringify({ pid: process.pid, hostname: hostname() }), {
+    await writeFile(path4.join(prepared, owner), JSON.stringify({ pid: process.pid, hostname: hostname() }), {
       flag: "wx",
       mode: PRIVATE_FILE_MODE
     });
@@ -2540,7 +2279,7 @@ async function recoverAbandonedLock(lock) {
   }
   if (entries.length === 0) return removeEmptyLock(lock);
   if (entries.length !== 1 || !/^owner-[\da-f-]+\.json$/.test(entries[0])) return false;
-  const ownerFile = path3.join(lock, entries[0]);
+  const ownerFile = path4.join(lock, entries[0]);
   let owner;
   try {
     owner = JSON.parse(FATAL_UTF8_DECODER.decode(await readFile3(ownerFile)));
@@ -2564,7 +2303,7 @@ async function recoverAbandonedLock(lock) {
   return removeEmptyLock(lock);
 }
 async function releaseLock(lock, owner) {
-  await unlink(path3.join(lock, owner));
+  await unlink(path4.join(lock, owner));
   await removeEmptyLock(lock);
 }
 async function removeEmptyLock(lock) {
@@ -2598,7 +2337,7 @@ async function readHistory(file) {
   if (!isRecord4(raw) || raw.version !== HISTORY_VERSION || Object.keys(raw).some((key) => key !== "version" && key !== "lastApplied") || !isRecord4(raw.lastApplied)) throw new Error(`Invalid last applied preset history at ${file}.`);
   const history = /* @__PURE__ */ Object.create(null);
   for (const [configFile, name] of Object.entries(raw.lastApplied)) {
-    if (!path3.isAbsolute(configFile) || typeof name !== "string" || !name.trim()) {
+    if (!path4.isAbsolute(configFile) || typeof name !== "string" || !name.trim()) {
       throw new Error(`Invalid last applied preset history at ${file}.`);
     }
     history[configFile] = name;
@@ -2615,7 +2354,7 @@ function hasCode(error, code) {
 // src/presets.ts
 import { randomBytes as randomBytes2 } from "node:crypto";
 import { mkdir as mkdir3, open as open3, readFile as readFile4, rename as rename2, rm as rm3 } from "node:fs/promises";
-import path4 from "node:path";
+import path5 from "node:path";
 import { TextDecoder as TextDecoder2 } from "node:util";
 var PRESETS_FILE = "model-configurator-presets.json";
 var PRESETS_VERSION = 1;
@@ -2628,7 +2367,7 @@ var FATAL_UTF8_DECODER2 = new TextDecoder2("utf-8", { fatal: true, ignoreBOM: tr
 var PresetConflictError = class extends Error {
 };
 function presetsFile(runtime) {
-  return path4.join(globalConfigRoot(runtime), PRESETS_FILE);
+  return path5.join(globalConfigRoot(runtime), PRESETS_FILE);
 }
 async function loadPresets(file) {
   let bytes;
@@ -2694,7 +2433,7 @@ async function writePresets(file, presets) {
   validatePresetDocument(document, file);
   const rendered = `${JSON.stringify(document, null, 2)}
 `;
-  const directory = path4.dirname(file);
+  const directory = path5.dirname(file);
   await mkdir3(directory, { recursive: true, mode: 448 });
   const suffix = `${timestamp2()}-${randomBytes2(3).toString("hex")}`;
   const temporary = `${file}.${suffix}.tmp`;
@@ -2854,41 +2593,40 @@ var OTHER_GROUP_TITLE = "Other subagents";
 var configuratorRunning = false;
 async function runModelConfigurator(api, profilesRoot) {
   if (configuratorRunning) {
-    api.ui.toast({ variant: "warning", message: "Model presets are already open." });
+    api.ui.toast.show({ variant: "warning", message: "Model presets are already open." });
     return;
   }
   configuratorRunning = true;
-  const previousDialogSize = api.ui.dialog.size;
   try {
-    if (!api.state.ready || !api.state.path.directory) {
-      api.ui.toast({ variant: "warning", message: "OpenCode paths are still syncing. Try again in a moment." });
+    if (!api.paths.directory) {
+      api.ui.toast.show({ variant: "warning", message: "OpenCode paths are still syncing. Try again in a moment." });
       return;
     }
-    api.ui.dialog.setSize("large");
+    api.ui.dialog.set({ size: "large" });
     const agents = await loadAgents(api);
     if (agents.length === 0) {
-      api.ui.toast({ variant: "warning", message: "This OpenCode server reported no agents to configure." });
+      api.ui.toast.show({ variant: "warning", message: "This OpenCode server reported no agents to configure." });
       return;
     }
     const { profiles, invalid } = await loadProfiles(profilesRoot, agents.map((agent) => agent.name));
     for (const entry of invalid) {
-      api.ui.toast({ variant: "warning", message: `Skipped profile ${entry.path}: ${entry.errors.join("; ")}` });
+      api.ui.toast.show({ variant: "warning", message: `Skipped profile ${entry.path}: ${entry.errors.join("; ")}` });
     }
-    const presetsPath = presetsFile(api.state.path);
+    const presetsPath = presetsFile(api.paths);
     let presets = [];
     let presetStorageAvailable = true;
     try {
       presets = await loadPresets(presetsPath);
     } catch (error) {
       presetStorageAvailable = false;
-      api.ui.toast({
+      api.ui.toast.show({
         variant: "warning",
         message: `Preset storage unavailable at ${presetsPath}: ${errorMessage(error)} Repair the file and reopen model presets.`
       });
     }
     const catalog = await loadCatalog(api);
     if (catalog.length === 0) {
-      api.ui.toast({ variant: "warning", message: "No connected providers with models are available. Connect one and retry." });
+      api.ui.toast.show({ variant: "warning", message: "No connected providers with models are available. Connect one and retry." });
       return;
     }
     const models = flattenModels(catalog);
@@ -2903,10 +2641,9 @@ async function runModelConfigurator(api, profilesRoot) {
     };
     await runSteps(api, state);
   } catch (error) {
-    api.ui.toast({ variant: "error", title: "Model presets failed", message: errorMessage(error), duration: 8e3 });
+    api.ui.toast.show({ variant: "error", title: "Model presets failed", message: errorMessage(error), duration: 8e3 });
   } finally {
     api.ui.dialog.clear();
-    api.ui.dialog.setSize(previousDialogSize);
     configuratorRunning = false;
   }
 }
@@ -2926,16 +2663,16 @@ async function runSteps(api, state) {
       index += direction;
       continue;
     }
-    const outcome2 = await step.run(state);
-    if (outcome2 === "exit" || outcome2 === "done") return;
-    direction = outcome2 === "next" ? 1 : -1;
+    const outcome = await step.run(state);
+    if (outcome === "exit" || outcome === "done") return;
+    direction = outcome === "next" ? 1 : -1;
     index += direction;
   }
 }
 async function runScopeStep(api, state) {
   const [projectFile, globalFile] = await Promise.all([
-    resolveConfigFile("project", api.state.path),
-    resolveConfigFile("global", api.state.path)
+    resolveConfigFile("project", api.paths),
+    resolveConfigFile("global", api.paths)
   ]);
   const warning = higherPrecedenceWarning();
   const suffix = warning ? ` \u2014 ${warning}` : "";
@@ -2943,8 +2680,8 @@ async function runScopeStep(api, state) {
     api,
     "Configuration scope",
     [
-      { title: "Project", value: "project", description: `${displayConfigFile("project", projectFile, api.state.path)}${suffix}` },
-      { title: "Global", value: "global", description: `${displayConfigFile("global", globalFile, api.state.path)}${suffix}` }
+      { title: "Project", value: "project", description: `${displayConfigFile("project", projectFile, api.paths)}${suffix}` },
+      { title: "Global", value: "global", description: `${displayConfigFile("global", globalFile, api.paths)}${suffix}` }
     ],
     CLOSE_HINT,
     state.scope
@@ -2955,9 +2692,9 @@ async function runScopeStep(api, state) {
   state.snapshot = await readConfigSnapshot(state.configFile);
   state.lastAppliedPreset = void 0;
   try {
-    state.lastAppliedPreset = await loadLastApplied(lastAppliedFile(api.state.path), state.configFile);
+    state.lastAppliedPreset = await loadLastApplied(lastAppliedFile(api.paths), state.configFile);
   } catch (error) {
-    api.ui.toast({ variant: "warning", message: `Last applied preset history unavailable: ${errorMessage(error)}` });
+    api.ui.toast.show({ variant: "warning", message: `Last applied preset history unavailable: ${errorMessage(error)}` });
   }
   return "next";
 }
@@ -3026,13 +2763,13 @@ async function runHubStep(api, state) {
       const name = selected.slice(PRESET_PREFIX.length);
       const preset = state.presets.find((entry) => entry.name === name);
       if (!preset) continue;
-      const outcome2 = await handlePresetChoice(api, state, preset);
-      if (outcome2 === "reshow") continue;
-      return outcome2;
+      const outcome = await handlePresetChoice(api, state, preset);
+      if (outcome === "reshow") continue;
+      return outcome;
     }
     const profileFile = state.profiles.find((file) => file.profile.name === selected);
     if (!profileFile) continue;
-    for (const warning of profileFile.warnings) api.ui.toast({ variant: "warning", message: warning });
+    for (const warning of profileFile.warnings) api.ui.toast.show({ variant: "warning", message: warning });
     state.source = { kind: "profile" };
     state.selectedProfile = profileFile;
     return "next";
@@ -3131,16 +2868,16 @@ async function handlePresetChoice(api, state, preset) {
     } catch (error) {
       state.presets = [];
       state.presetStorageAvailable = false;
-      api.ui.toast({ variant: "error", title: "Preset not deleted", message: errorMessage(error), duration: 8e3 });
+      api.ui.toast.show({ variant: "error", title: "Preset not deleted", message: errorMessage(error), duration: 8e3 });
       return "reshow";
     }
     state.presets = state.presets.filter((entry) => entry.name !== preset.name);
-    api.ui.toast({ variant: "success", message: `Deleted preset "${preset.name}".` });
+    api.ui.toast.show({ variant: "success", message: `Deleted preset "${preset.name}".` });
     return "reshow";
   }
   const { valid, stale } = partitionPresetAssignments(preset.assignments, state.agents.map((agent) => agent.name), state.models);
   if (Object.keys(valid).length === 0) {
-    api.ui.toast({ variant: "warning", message: `Preset "${preset.name}" has no entries that match the live catalog.` });
+    api.ui.toast.show({ variant: "warning", message: `Preset "${preset.name}" has no entries that match the live catalog.` });
     return "reshow";
   }
   if (stale.length > 0) {
@@ -3273,7 +3010,7 @@ async function runReviewStep(api, state) {
   const changes = calculateChanges(snapshot.mappings, decisions);
   const sourcePresetName = state.source?.kind === "preset" ? state.source.name : void 0;
   if (changes.length === 0 && !sourcePresetName) {
-    api.ui.toast({ variant: "info", message: "No model assignment changes selected." });
+    api.ui.toast.show({ variant: "info", message: "No model assignment changes selected." });
     return "back";
   }
   const warning = higherPrecedenceWarning();
@@ -3305,22 +3042,24 @@ async function runReviewStep(api, state) {
       disabled: !namedStorageAvailable || state.presets.length === 0
     }
   ];
-  const choice = await select(
-    api,
-    title,
-    [
-      ...actions,
-      { title: "Cancel", value: CANCEL },
-      ...rows.map((change) => ({
-        title: change.agent,
-        value: `__change__:${change.agent}`,
-        description: `${formatMapping(change.before)} -> ${formatMapping(change.after)}`,
-        category: categoryOf.get(change.agent) ?? "other",
-        disabled: true
-      }))
-    ],
-    BACK_HINT
-  );
+  let choice;
+  do {
+    choice = await select(
+      api,
+      title,
+      [
+        ...actions,
+        { title: "Cancel", value: CANCEL },
+        ...rows.map((change) => ({
+          title: change.agent,
+          value: `__change__:${change.agent}`,
+          description: `${formatMapping(change.before)} -> ${formatMapping(change.after)}`,
+          category: categoryOf.get(change.agent) ?? "other"
+        }))
+      ],
+      BACK_HINT
+    );
+  } while (choice?.startsWith("__change__:"));
   if (!choice) return "back";
   if (choice === CANCEL) return "done";
   if (sourcePresetName && choice !== APPLY_NAMED_PRESET) return "back";
@@ -3345,7 +3084,7 @@ async function runReviewStep(api, state) {
   const refreshedModels = flattenModels(await loadCatalog(api));
   const stale = findStaleSelections(decisions, refreshedModels);
   if (stale.length > 0) {
-    api.ui.toast({ variant: "warning", message: `Selections changed in the live catalog: ${stale.join(", ")}. Reopen and select again.` });
+    api.ui.toast.show({ variant: "warning", message: `Selections changed in the live catalog: ${stale.join(", ")}. Reopen and select again.` });
     return "exit";
   }
   const assignments = resolvePresetAssignments(snapshot.mappings, changes, state.agents.map((agent) => agent.name));
@@ -3358,12 +3097,12 @@ async function runReviewStep(api, state) {
       );
     } catch (error) {
       if (isPresetConflictError(error)) {
-        api.ui.toast({ variant: "warning", message: errorMessage(error) });
+        api.ui.toast.show({ variant: "warning", message: errorMessage(error) });
         return "done";
       }
       state.presets = [];
       state.presetStorageAvailable = false;
-      api.ui.toast({
+      api.ui.toast.show({
         variant: "error",
         title: "Preset not saved",
         message: `${errorMessage(error)} Configuration was not applied.`,
@@ -3377,14 +3116,14 @@ async function runReviewStep(api, state) {
     result = await applyConfigChanges(
       api.client,
       state.scope,
-      api.state.path,
+      api.paths,
       snapshot,
       changes,
       {},
       { forceWrite: sourcePresetName !== void 0 }
     );
   } catch (error) {
-    api.ui.toast({
+    api.ui.toast.show({
       variant: "error",
       title: "Configuration not applied",
       message: presetMutated ? `Preset "${presetName}" was saved, but ${errorMessage(error)}` : `Preset "${presetName}" was not applied: ${errorMessage(error)}`,
@@ -3393,19 +3132,19 @@ async function runReviewStep(api, state) {
     return "done";
   }
   try {
-    await saveLastApplied(lastAppliedFile(api.state.path), result.file, presetName);
+    await saveLastApplied(lastAppliedFile(api.paths), result.file, presetName);
     state.lastAppliedPreset = presetName;
   } catch (error) {
-    api.ui.toast({
+    api.ui.toast.show({
       variant: "warning",
       message: `Configuration was applied, but the last applied preset name could not be saved: ${errorMessage(error)}`,
       duration: 8e3
     });
   }
-  api.ui.toast({
+  api.ui.toast.show({
     variant: "success",
     title: "Agent models updated",
-    message: result.hotApplied ? `Applied preset "${presetName}". Wrote ${result.file}. Applied live to this OpenCode server; other running OpenCode processes still need a restart.` : `Applied preset "${presetName}". Wrote ${result.file}. Restart OpenCode sessions to apply the assignments (${result.detail}).`,
+    message: result.hotApplied ? `Applied preset "${presetName}". Wrote ${result.file}. Applied live: all loaded locations on this server were reloaded; pending permissions and forms were cancelled. Other servers need a reload.` : `Applied preset "${presetName}". Wrote ${result.file}. Restart OpenCode sessions to apply the assignments (${result.detail}).`,
     duration: 8e3
   });
   return "done";
@@ -3416,11 +3155,11 @@ async function promptNewPresetName(api, state) {
     if (name === void 0) return void 0;
     const trimmed = name.trim();
     if (!trimmed) {
-      api.ui.toast({ variant: "warning", message: "Preset name cannot be empty." });
+      api.ui.toast.show({ variant: "warning", message: "Preset name cannot be empty." });
       continue;
     }
     if (state.presets.some((entry) => entry.name === trimmed)) {
-      api.ui.toast({ variant: "warning", message: `Preset "${trimmed}" already exists. Use Update existing preset.` });
+      api.ui.toast.show({ variant: "warning", message: `Preset "${trimmed}" already exists. Use Update existing preset.` });
       continue;
     }
     return trimmed;
@@ -3451,7 +3190,7 @@ async function refreshSelectedPreset(api, state, name) {
   } catch (error) {
     state.presets = [];
     state.presetStorageAvailable = false;
-    api.ui.toast({
+    api.ui.toast.show({
       variant: "error",
       title: "Preset unavailable",
       message: `${errorMessage(error)} Configuration was not applied.`,
@@ -3462,7 +3201,7 @@ async function refreshSelectedPreset(api, state, name) {
   const selected = state.presets.find((preset) => preset.name === name);
   const refreshed = latest.find((preset) => preset.name === name);
   if (!selected || !refreshed || !assignmentRecordsEqual(selected.assignments, refreshed.assignments)) {
-    api.ui.toast({
+    api.ui.toast.show({
       variant: "warning",
       message: `Preset "${name}" changed while the configurator was open. Reopen and select it again.`
     });
@@ -3543,15 +3282,13 @@ async function selectVariant(api, model, suggested) {
   return selected === NO_VARIANT ? "" : selected;
 }
 async function loadCatalog(api) {
-  const result = await api.client.provider.list();
-  return normalizeProviderCatalog(result);
+  return normalizeModelCatalog(await api.client.model.list({ location: { directory: api.paths.directory } }));
 }
 async function loadAgents(api) {
-  const app = api.client.app;
-  if (typeof app?.agents !== "function") {
-    throw new Error("This OpenCode server does not expose the agent list (GET /agent). Update OpenCode and retry.");
+  if (typeof api.client.agent?.list !== "function") {
+    throw new Error("This OpenCode server does not expose the agent list (GET /api/agent). Update OpenCode and retry.");
   }
-  return normalizeLiveAgents(await app.agents({ directory: api.state.path.directory }));
+  return normalizeLiveAgents(await api.client.agent.list({ location: { directory: api.paths.directory } }));
 }
 function reviewCategories(agents) {
   const hierarchy = buildAgentHierarchy(agents);
@@ -3590,102 +3327,56 @@ function variantDescription(model) {
   return model.variants.length === 0 ? "No variants" : `${model.variants.length} variant${model.variants.length === 1 ? "" : "s"}`;
 }
 function select(api, title, options, placeholder = BACK_HINT, current) {
-  return new Promise((resolve) => {
-    const DialogSelect = api.ui.DialogSelect;
-    let settled = false;
-    const finish = (value) => {
-      if (settled) return;
-      settled = true;
-      resolve(value);
-    };
-    api.ui.dialog.replace(
-      () => DialogSelect({
-        title,
-        options,
-        current,
-        placeholder,
-        onSelect: (option) => {
-          finish(option.value);
-          api.ui.dialog.clear();
-        }
-      }),
-      () => finish(void 0)
-    );
-  });
+  return api.ui.dialog.select({ title, options, current, placeholder });
 }
 function confirmStep(api, title, message) {
-  return new Promise((resolve) => {
-    const DialogConfirm = api.ui.DialogConfirm;
-    let settled = false;
-    const finish = (value) => {
-      if (settled) return;
-      settled = true;
-      api.ui.dialog.clear();
-      resolve(value);
-    };
-    api.ui.dialog.replace(
-      () => DialogConfirm({ title, message: `${message}
+  return api.ui.dialog.confirm({ title, message: `${message}
 
-${BACK_HINT}`, onConfirm: () => finish(true), onCancel: () => finish(false) }),
-      () => finish(void 0)
-    );
-  });
+${BACK_HINT}` });
 }
 function prompt(api, title, placeholder) {
-  return new Promise((resolve) => {
-    const DialogPrompt = api.ui.DialogPrompt;
-    let settled = false;
-    const finish = (value) => {
-      if (settled) return;
-      settled = true;
-      api.ui.dialog.clear();
-      resolve(value);
-    };
-    api.ui.dialog.replace(
-      () => DialogPrompt({ title, placeholder, onConfirm: (value) => finish(value), onCancel: () => finish(void 0) }),
-      () => finish(void 0)
-    );
-  });
+  return api.ui.dialog.prompt({ title, placeholder });
 }
 function errorMessage(error) {
   return error instanceof Error ? error.message : "Unknown model presets error";
 }
 
 // src/tui.tsx
-var MODELS_PRESETS_PLUGIN_ID = "models-presets";
+var MODELS_PRESETS_PLUGIN_ID = "opencode-models-presets";
 var MODELS_PRESETS_COMMAND_ID = "models-presets.open";
 var MODELS_PRESETS_SLASH_NAME = "models-profiles";
-var MINIMUM_OPENCODE_VERSION = "1.17.15";
-var tui = async (api, rawOptions) => {
-  const options = normalizePluginOptions(rawOptions);
-  api.keymap.registerLayer({
-    commands: [
-      {
-        name: MODELS_PRESETS_COMMAND_ID,
+var MINIMUM_OPENCODE_VERSION = "2.0.28";
+var tui_default = Plugin.define({
+  id: MODELS_PRESETS_PLUGIN_ID,
+  setup(context) {
+    const options = normalizePluginOptions(context.options);
+    context.keymap.layer(() => ({
+      mode: "global",
+      commands: [{
+        id: MODELS_PRESETS_COMMAND_ID,
         title: "Configure model presets",
-        desc: "Assign models and variants by agent or reuse a saved preset",
-        category: "Model Presets",
-        namespace: "palette",
-        slashName: MODELS_PRESETS_SLASH_NAME,
-        run() {
-          void resolveProfilesRoot(import.meta.url, options.profilesDir, api.state.path.directory).then((profilesRoot) => runModelConfigurator(api, profilesRoot)).catch((error) => {
-            api.ui.toast({
+        description: "Assign models and variants by agent or reuse a saved preset",
+        group: "Model Presets",
+        palette: true,
+        slash: { name: MODELS_PRESETS_SLASH_NAME },
+        async run() {
+          try {
+            const host = createConfiguratorHost(context);
+            const profilesRoot = await resolveProfilesRoot(import.meta.url, options.profilesDir, host.paths.directory);
+            await runModelConfigurator(host, profilesRoot);
+          } catch (error) {
+            context.ui.toast.show({
               variant: "error",
               title: "Model presets failed",
               message: String(error instanceof Error ? error.message : error),
               duration: 8e3
             });
-          });
+          }
         }
-      }
-    ]
-  });
-};
-var plugin = {
-  id: MODELS_PRESETS_PLUGIN_ID,
-  tui
-};
-var tui_default = plugin;
+      }]
+    }));
+  }
+});
 export {
   MINIMUM_OPENCODE_VERSION,
   MODELS_PRESETS_COMMAND_ID,

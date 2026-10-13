@@ -11,7 +11,7 @@ import {
   calculateChanges,
   formatMapping,
   normalizeLiveAgents,
-  normalizeProviderCatalog,
+  normalizeModelCatalog,
   resolveProfilesRoot,
   validateProfile,
   visibleAgents,
@@ -21,7 +21,6 @@ import {
 } from "../src/domain"
 import {
   applyConfigChanges,
-  planGlobalHotApply,
 } from "../src/hot-apply"
 import {
   displayConfigFile,
@@ -45,14 +44,10 @@ import modelsPresetsPlugin, {
   MODELS_PRESETS_SLASH_NAME,
 } from "../src/tui"
 import { runModelConfigurator } from "../src/wizard"
-import type {
-  TuiDialogConfirmProps,
-  TuiDialogPromptProps,
-  TuiDialogSelectProps,
-  TuiPluginApi,
-  TuiPluginMeta,
-  TuiToast,
-} from "@opencode-ai/plugin/tui"
+import type { Context } from "@opencode/plugin/tui/plugin"
+import type { DialogSelectOptions, DialogConfirmOptions, DialogPromptOptions, ToastOptions as TuiToast } from "@opencode/plugin/tui/context"
+import { createConfiguratorHost, type ConfiguratorHost } from "../src/host"
+
 
 const ROOT = path.resolve(import.meta.dirname, "..")
 const FIXTURES = path.join(ROOT, "tests", "fixtures")
@@ -63,19 +58,6 @@ const CONFIG_BEFORE_BYTES = await readFile(path.join(FIXTURES, "config-before.js
 const CONFIG_AFTER_BYTES = await readFile(path.join(FIXTURES, "config-after.jsonc"))
 const LATE_EDIT_BYTES = Buffer.from('{\n  "external": true\n}\n')
 const SECOND_EXTERNAL_EDIT_BYTES = Buffer.from('{\n  "secondExternal": true\n}\n')
-const GLOBAL_CONFIG_BYTES = Buffer.from(
-  '{\n  "agent": {\n    "alpha": {"model": "openai/old"},\n    "beta": {"model": "anthropic/old"}\n  }\n}\n',
-)
-const GLOBAL_EXTERNAL_EDIT_BYTES = Buffer.from(
-  '{\n  "external": true,\n  "agent": {\n    "alpha": {"model": "openai/external"}\n  }\n}\n',
-)
-const GLOBAL_PRELUDE_BYTES = Buffer.from(
-  '{\n  "agent": {\n    "alpha": {\n      "model": "openai/old"\n    }\n  }\n}\n',
-)
-const GLOBAL_FALLBACK_BYTES = Buffer.from(
-  '{\n  "agent": {\n    "alpha": {\n      "model": "openai/new"\n    }\n  }\n}\n',
-)
-const INJECTED_FALLBACK_FAILURE = "injected fallback failure"
 const INJECTED_POST_VALIDATE_FAILURE = "injected post-validate failure"
 const CONFIG_WRITE_DIRECTORY_SUFFIX = ".write"
 const CONFIG_WRITE_CLAIM_NAME = "claim"
@@ -104,32 +86,34 @@ let passes = 0
 async function shouldRegisterModelsPresetsNamesWhenTuiLoads(): Promise<void> {
   // Given
   const layers: unknown[] = []
-  const api = {
+  const context = {
+    options: {},
     keymap: {
-      registerLayer(layer: unknown) {
-        layers.push(layer)
+      layer(factory: () => unknown) {
+        layers.push(factory())
       },
     },
-  } as unknown as TuiPluginApi
+  } as unknown as Context
 
   // When
-  await modelsPresetsPlugin.tui(api, undefined, {} as TuiPluginMeta)
+  await modelsPresetsPlugin.setup(context)
 
   // Then
   assert.equal(modelsPresetsPlugin.id, MODELS_PRESETS_PLUGIN_ID)
-  assert.equal(MODELS_PRESETS_PLUGIN_ID, "models-presets")
+  assert.equal(MODELS_PRESETS_PLUGIN_ID, "opencode-models-presets")
   assert.equal(layers.length, 1)
-  const layer = layers[0] as { commands: Array<Record<string, unknown>> }
+  const layer = layers[0] as { mode: string; commands: Array<Record<string, unknown>> }
+  assert.equal(layer.mode, "global")
   assert.equal(layer.commands.length, 1)
   const { run, ...command } = layer.commands[0]
   assert.equal(typeof run, "function")
   assert.deepEqual(command, {
-    name: MODELS_PRESETS_COMMAND_ID,
+    id: MODELS_PRESETS_COMMAND_ID,
     title: "Configure model presets",
-    desc: "Assign models and variants by agent or reuse a saved preset",
-    category: "Model Presets",
-    namespace: "palette",
-    slashName: MODELS_PRESETS_SLASH_NAME,
+    description: "Assign models and variants by agent or reuse a saved preset",
+    group: "Model Presets",
+    palette: true,
+    slash: { name: MODELS_PRESETS_SLASH_NAME },
   })
   assert.equal(MODELS_PRESETS_COMMAND_ID, "models-presets.open")
   assert.equal(MODELS_PRESETS_SLASH_NAME, "models-profiles")
@@ -273,26 +257,6 @@ async function shouldKeepKnownAgentsAndWarnWhenTierReferencesAgentsMissingOnThis
   assert.deepEqual(actual.warnings, ["tier 'high' skips agents missing on this server: missing"])
   assert.deepEqual(actual.profile?.tiers.high.agents, ["alpha"])
   pass("shouldKeepKnownAgentsAndWarnWhenTierReferencesAgentsMissingOnThisServer")
-}
-
-async function shouldExposeOnlyConnectedProvidersWhenCatalogContainsDisconnectedEntries(): Promise<void> {
-  // Given
-  const response = {
-    data: {
-      connected: ["openai", "missing"],
-      all: [
-        { id: "anthropic", models: { opus: { variants: { high: {} } } } },
-        { id: "openai", models: { gpt: { variants: ["medium", "high"] } } },
-      ],
-    },
-  }
-
-  // When
-  const actual = normalizeProviderCatalog(response)
-
-  // Then
-  assert.deepEqual(actual, [{ id: "openai", models: [{ id: "gpt", variants: ["high", "medium"] }] }])
-  pass("shouldExposeOnlyConnectedProvidersWhenCatalogContainsDisconnectedEntries")
 }
 
 async function shouldCalculateOnlyChangedAssignmentsWhenDecisionsMixActions(): Promise<void> {
@@ -1237,17 +1201,12 @@ async function shouldReloadAndRejectStaleSelectionAfterFinalApplyInteraction(): 
         return true
       },
     })
-    const provider = api.client.provider as unknown as { list: () => Promise<unknown> }
-    const listAvailableModels = provider.list.bind(provider)
+    const provider = api.client.model as unknown as { list: (input?: unknown) => Promise<unknown> }
+    const listAvailableModels = provider.list.bind(provider, { location: { directory: api.paths.directory } })
     provider.list = async () =>
       modelAvailable
         ? listAvailableModels()
-        : {
-            data: {
-              connected: ["anthropic"],
-              all: [{ id: "anthropic", models: { old: { variants: {} } } }],
-            },
-          }
+        : { data: [{ providerID: "anthropic", id: "old", enabled: true, variants: [] }] }
 
     // When
     await runModelConfigurator(api, scratch.profiles)
@@ -1445,7 +1404,7 @@ async function shouldCreateNamedPresetWhenApplying(): Promise<void> {
     assert.equal(presets.length, 1)
     assert.equal(presets[0].name, "prod")
     assert.deepEqual(presets[0].assignments, { alpha: { model: "openai/new", variant: "high" } })
-    assert.equal(await loadLastApplied(lastAppliedFile(api.state.path), configFile), "prod")
+    assert.equal(await loadLastApplied(lastAppliedFile(api.paths), configFile), "prod")
     pass("shouldCreateNamedPresetWhenApplying")
   } finally {
     await rm(scratch.root, { recursive: true, force: true })
@@ -1547,7 +1506,7 @@ async function shouldApplyPresetSkippingTiersAndOverrides(): Promise<void> {
     })
     assert.equal(applyActionTitle, 'Apply preset "saved"')
     assert.equal(toasts.at(-1)?.variant, "success")
-    assert.equal(await loadLastApplied(lastAppliedFile(api.state.path), configFile), "saved")
+    assert.equal(await loadLastApplied(lastAppliedFile(api.paths), configFile), "saved")
     pass("shouldApplyPresetSkippingTiersAndOverrides")
   } finally {
     await rm(scratch.root, { recursive: true, force: true })
@@ -3301,7 +3260,7 @@ async function shouldUpdatePresetBySelectingExistingName(): Promise<void> {
       alpha: { model: "openai/new", variant: "high" },
       beta: { model: "anthropic/old" },
     })
-    assert.equal(await loadLastApplied(lastAppliedFile(api.state.path), configFile), "saved")
+    assert.equal(await loadLastApplied(lastAppliedFile(api.paths), configFile), "saved")
     pass("shouldUpdatePresetBySelectingExistingName")
   } finally {
     await rm(scratch.root, { recursive: true, force: true })
@@ -3441,6 +3400,7 @@ async function shouldGroupReviewChangesByParentAgent(): Promise<void> {
     let hubVisits = 0
     let oneVisits = 0
     let twoVisits = 0
+    let reviewVisits = 0
     let reviewRows: Array<{ value: string; category?: string }> = []
     const api = createFakeApi(scratch, toasts, {
       select(title, options) {
@@ -3465,7 +3425,9 @@ async function shouldGroupReviewChangesByParentAgent(): Promise<void> {
           reviewRows = (options as Array<{ value: string; category?: string }>).filter((candidate) =>
             candidate.value.startsWith("__change__:"),
           )
-          return option(options, "__create_preset__")
+          assert.ok(options.filter((candidate) => candidate.value.startsWith("__change__:")).every((candidate) => !candidate.disabled))
+          reviewVisits++
+          return option(options, reviewVisits === 1 ? "__change__:alpha" : "__create_preset__")
         }
         throw new Error(`unexpected select dialog: ${title}`)
       },
@@ -3485,6 +3447,7 @@ async function shouldGroupReviewChangesByParentAgent(): Promise<void> {
         { value: "__change__:beta", category: "Other subagents" },
       ],
     )
+    assert.equal(reviewVisits, 2)
     assert.equal(toasts.at(-1)?.variant, "success")
     pass("shouldGroupReviewChangesByParentAgent")
   } finally {
@@ -3638,7 +3601,7 @@ async function shouldStopWithGuidanceWhenServerCannotListAgents(): Promise<void>
         return true
       },
     })
-    ;(api as unknown as { client: { app: Record<string, unknown> } }).client.app = {}
+    ;(api as unknown as { client: { agent: Record<string, unknown> } }).client.agent = {}
 
     // When
     await runModelConfigurator(api, scratch.profiles)
@@ -3699,967 +3662,110 @@ async function shouldPartitionPresetAssignmentsByLiveCatalog(): Promise<void> {
   pass("shouldPartitionPresetAssignmentsByLiveCatalog")
 }
 
-async function shouldPlanGlobalHotApplyAsPatchWithLocalPreludeForDeletions(): Promise<void> {
-  // Given a mix of a model set, an inherit, and a variant-removal-only set
-  const changes: AgentChange[] = [
-    { agent: "alpha", before: { model: "openai/old" }, after: { model: "openai/new", variant: "high" }, action: "set" },
-    { agent: "beta", before: { model: "anthropic/old" }, after: {}, action: "inherit" },
-    { agent: "gamma", before: { model: "openai/keep", variant: "low" }, after: { model: "openai/keep" }, action: "set" },
-  ]
-
-  // When
-  const plan = planGlobalHotApply(changes)
-
-  // Then deletions go to the local prelude and PATCHable leaves to the payload
-  assert.equal(plan.strategy, "patch")
-  if (plan.strategy !== "patch") return
-  assert.deepEqual(plan.preludeChanges, [
-    changes[1],
-    { agent: "gamma", before: { model: "openai/keep", variant: "low" }, after: { model: "openai/keep" }, action: "set" },
-  ])
-  assert.deepEqual(plan.patch, {
-    agent: {
-      alpha: { model: "openai/new", variant: "high" },
-      gamma: { model: "openai/keep" },
-    },
-  })
-  assert.deepEqual(plan.fallbackChanges, [changes[0], changes[2]])
-  pass("shouldPlanGlobalHotApplyAsPatchWithLocalPreludeForDeletions")
-}
-
-async function shouldPlanWriteOnlyWhenGlobalChangesAreRemovalOnly(): Promise<void> {
-  // Given inherit-only changes, and separately a variant-removal-only set
-  const inheritOnly: AgentChange[] = [
-    { agent: "beta", before: { model: "anthropic/old" }, after: {}, action: "inherit" },
-  ]
-  const variantRemovalOnly: AgentChange[] = [
-    { agent: "gamma", before: { model: "openai/keep", variant: "low" }, after: { model: "openai/keep" }, action: "set" },
-  ]
-
-  // Then neither has a byte-changing leaf the global PATCH could carry
-  assert.equal(planGlobalHotApply(inheritOnly).strategy, "write-only")
-  assert.equal(planGlobalHotApply(variantRemovalOnly).strategy, "write-only")
-  pass("shouldPlanWriteOnlyWhenGlobalChangesAreRemovalOnly")
-}
-
-async function shouldHotApplyProjectScopeByDisposingTheProjectInstance(): Promise<void> {
-  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-hot-apply."))
+async function shouldReloadBothScopesAfterDurableWriteAndRetainFilesOnReloadFailure(): Promise<void> {
+  const scratch = await mkdtemp(path.join(tmpdir(), "models-v2-reload."))
   try {
-    // Given a project config snapshot and a client exposing instance disposal.
-    // Like the SDK v2 generated groups, the fake is a class whose method reads
-    // this — a detached (unbound) call fails here like it does in production.
-    const file = path.join(scratch, "opencode.jsonc")
-    await writeFile(file, '{\n  "agent": {\n    "alpha": {"model": "openai/old"}\n  }\n}\n')
-    const snapshot = await readConfigSnapshot(file)
-    class FakeInstanceGroup {
-      disposedDirectories: string[] = []
-      async dispose(parameters: { directory: string }) {
-        this.disposedDirectories.push(parameters.directory)
-        return { data: true }
-      }
-    }
-    const instance = new FakeInstanceGroup()
-    const client = { instance }
-    const runtime = { config: scratch, worktree: "/work/project", directory: "/work/project" }
-    const changes: AgentChange[] = [
-      { agent: "alpha", before: { model: "openai/old" }, after: { model: "openai/new" }, action: "set" },
-    ]
-
-    // When
-    const result = await applyConfigChanges(client, "project", runtime, snapshot, changes)
-
-    // Then the write lands and the project instance is disposed once
-    assert.deepEqual(result, { file, hotApplied: true })
-    assert.deepEqual(instance.disposedDirectories, ["/work/project"])
-    assert.deepEqual((await readConfigSnapshot(file)).mappings, { alpha: { model: "openai/new", variant: undefined } })
-    pass("shouldHotApplyProjectScopeByDisposingTheProjectInstance")
-  } finally {
-    await rm(scratch, { recursive: true, force: true })
-  }
-}
-
-async function shouldHotApplyGlobalScopeViaConfigPatchAfterLocalDeletions(): Promise<void> {
-  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-hot-apply."))
-  try {
-    // Given a global config with an inherit target and a stale variant to delete
-    const file = path.join(scratch, "opencode.jsonc")
-    await writeFile(
-      file,
-      '{\n  // Keep me.\n  "agent": {\n    "alpha": {"model": "openai/old"},\n    "beta": {"model": "anthropic/old"},\n    "gamma": {"model": "openai/keep", "variant": "low"}\n  }\n}\n',
-    )
-    const snapshot = await readConfigSnapshot(file)
-    // Class-based fake like the SDK v2 groups: update reads this, so an
-    // unbound call fails here like it does in production.
-    class FakeGlobalConfigGroup {
-      patches: Array<{ config: unknown; fileAtPatchTime: string }> = []
-      async update(parameters: { config: unknown }) {
-        this.patches.push({ config: parameters.config, fileAtPatchTime: await readFile(file, "utf8") })
-        return { data: {} }
-      }
-    }
-    const globalConfig = new FakeGlobalConfigGroup()
-    const client = { global: { config: globalConfig } }
-    const runtime = { config: scratch, worktree: "/work/project", directory: "/work/project" }
-    const changes: AgentChange[] = [
-      { agent: "alpha", before: { model: "openai/old" }, after: { model: "openai/new", variant: "high" }, action: "set" },
-      { agent: "beta", before: { model: "anthropic/old" }, after: {}, action: "inherit" },
-      { agent: "gamma", before: { model: "openai/keep", variant: "low" }, after: { model: "openai/keep" }, action: "set" },
-    ]
-
-    // When
-    const result = await applyConfigChanges(client, "global", runtime, snapshot, changes)
-
-    // Then deletions were on disk before the PATCH, which carried only the set leaves
-    assert.deepEqual(result, { file, hotApplied: true })
-    assert.equal(globalConfig.patches.length, 1)
-    assert.deepEqual(globalConfig.patches[0].config, {
-      agent: { alpha: { model: "openai/new", variant: "high" }, gamma: { model: "openai/keep" } },
-    })
-    assert.equal(globalConfig.patches[0].fileAtPatchTime.includes("beta"), false)
-    assert.equal(globalConfig.patches[0].fileAtPatchTime.includes("low"), false)
-    assert.equal(globalConfig.patches[0].fileAtPatchTime.includes("// Keep me."), true)
-    // And the set leaves stay with the server-side PATCH, not a second local write
-    assert.deepEqual((await readConfigSnapshot(file)).mappings, {
-      alpha: { model: "openai/old", variant: undefined },
-      gamma: { model: "openai/keep", variant: undefined },
-    })
-    pass("shouldHotApplyGlobalScopeViaConfigPatchAfterLocalDeletions")
-  } finally {
-    await rm(scratch, { recursive: true, force: true })
-  }
-}
-
-async function shouldFallBackToLocalWriteWhenGlobalPatchFails(): Promise<void> {
-  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-hot-apply."))
-  try {
-    // Given a global PATCH that the server rejects
-    const file = path.join(scratch, "opencode.jsonc")
-    await writeFile(file, '{\n  "agent": {\n    "alpha": {"model": "openai/old"},\n    "beta": {"model": "anthropic/old"}\n  }\n}\n')
-    const snapshot = await readConfigSnapshot(file)
-    const client = {
-      global: {
-        config: {
-          update: async () => ({ error: { name: "BadRequest" }, response: { status: 400 } }),
+    const file = path.join(scratch, "opencode.json")
+    const runtime = { config: scratch, worktree: scratch, directory: scratch }
+    for (const scope of ["project", "global"] as const) {
+      await writeFile(file, '{"agent":{"alpha":{"model":"openai/old","variant":"high"}}}')
+      const snapshot = await readConfigSnapshot(file)
+      const changes: AgentChange[] = [{ agent: "alpha", before: snapshot.mappings.alpha, after: {}, action: "inherit" }]
+      const location = {
+        calls: 0,
+        async reload() {
+          this.calls++
+          assert.deepEqual((await readConfigSnapshot(file)).mappings, {})
         },
-      },
+      }
+      assert.equal((await applyConfigChanges({ location }, scope, runtime, snapshot, changes)).hotApplied, true)
+      assert.equal(location.calls, 1)
     }
-    const runtime = { config: scratch, worktree: "/work/project", directory: "/work/project" }
-    const changes: AgentChange[] = [
-      { agent: "alpha", before: { model: "openai/old" }, after: { model: "openai/new" }, action: "set" },
-      { agent: "beta", before: { model: "anthropic/old" }, after: {}, action: "inherit" },
-    ]
-
-    // When
-    const result = await applyConfigChanges(client, "global", runtime, snapshot, changes)
-
-    // Then every change still lands locally and the outcome reports the failure
+    const snapshot = await readConfigSnapshot(file)
+    const changes: AgentChange[] = [{ agent: "alpha", before: {}, after: { model: "openai/new" }, action: "set" }]
+    const result = await applyConfigChanges({ location: { async reload() { throw new Error("offline") } } }, "global", runtime, snapshot, changes)
     assert.equal(result.hotApplied, false)
-    assert.equal(result.detail?.includes("status 400"), true)
-    assert.deepEqual((await readConfigSnapshot(file)).mappings, { alpha: { model: "openai/new", variant: undefined } })
-    pass("shouldFallBackToLocalWriteWhenGlobalPatchFails")
-  } finally {
-    await rm(scratch, { recursive: true, force: true })
-  }
+    assert.equal(result.detail, "offline")
+    assert.equal((await readConfigSnapshot(file)).mappings.alpha.model, "openai/new")
+    let calls = 0
+    await writeFile(file, '{"external":true}')
+    await assert.rejects(applyConfigChanges({ location: { async reload() { calls++ } } }, "project", runtime, snapshot, changes), /changed/)
+    assert.equal(calls, 0)
+    pass("shouldReloadBothScopesAfterDurableWriteAndRetainFilesOnReloadFailure")
+  } finally { await rm(scratch, { recursive: true, force: true }) }
 }
 
-async function shouldRejectWithoutClobberWhenConcurrentEditPrecedesGlobalFallback(): Promise<void> {
-  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-hot-apply."))
-  try {
-    // Given
-    const file = path.join(scratch, CONFIG_FILE_NAME)
-    await writeFile(file, GLOBAL_CONFIG_BYTES, { mode: CONFIG_FILE_MODE })
-    const snapshot = await readConfigSnapshot(file)
-    let patchCalls = 0
-    const client = {
-      global: {
-        config: {
-          update: async () => {
-            patchCalls += 1
-            await writeFile(file, GLOBAL_EXTERNAL_EDIT_BYTES)
-            return { error: { name: "BadRequest" }, response: { status: 400 } }
-          },
-        },
-      },
-    }
-    const runtime = { config: scratch, worktree: "/work/project", directory: "/work/project" }
-    const changes: AgentChange[] = [
-      { agent: "alpha", before: { model: "openai/old" }, after: { model: "openai/new" }, action: "set" },
-      { agent: "beta", before: { model: "anthropic/old" }, after: {}, action: "inherit" },
-    ]
-    const hookOccurrences = persistenceHookCounts()
-    let failure: unknown
-
-    // When
-    try {
-      await applyConfigChanges(client, "global", runtime, snapshot, changes, {
-        before(step) {
-          hookOccurrences[step] += 1
-        },
-      })
-    } catch (error) {
-      failure = error
-    }
-
-    // Then
-    assert.deepEqual(
-      {
-        rejection: {
-          aggregate: failure instanceof AggregateError,
-          message: failure instanceof Error ? failure.message : failure,
-          causes: failure instanceof AggregateError
-            ? failure.errors.map((error) => (error instanceof Error ? error.message : String(error)))
-            : [],
-        },
-        patchCalls,
-        hookOccurrences,
-        bytes: await readFile(file),
-        mode: (await stat(file)).mode & 0o777,
-        entries: (await readdir(scratch)).sort(),
-      },
-      {
-        rejection: {
-          aggregate: false,
-          message: `${file} changed while the configurator was open; reload and retry`,
-          causes: [],
-        },
-        patchCalls: 1,
-        hookOccurrences: {
-          "temporary-open": 1,
-          "temporary-write": 1,
-          "temporary-flush": 1,
-          rename: 1,
-          "destination-flush": 1,
-          "post-validate": 1,
-          "recovery-restore": 0,
-          "ownership-release": 0,
-        },
-        bytes: GLOBAL_EXTERNAL_EDIT_BYTES,
-        mode: CONFIG_FILE_MODE,
-        entries: [CONFIG_FILE_NAME],
-      },
-    )
-    pass("shouldRejectWithoutClobberWhenConcurrentEditPrecedesGlobalFallback")
-  } finally {
-    await rm(scratch, { recursive: true, force: true })
-  }
+async function shouldPreserveV2AgentIdsPermissionsAndEnabledModelVariants(): Promise<void> {
+  const agents = normalizeLiveAgents({ data: [
+    { id: "build", name: "Build", mode: "primary", permissions: [{ action: "subagent", resource: "review*", effect: "allow" }] },
+    { id: "reviewer", name: "Reviewer", mode: "subagent", permissions: [] },
+  ] })
+  assert.deepEqual(buildAgentHierarchy(agents).groups[0].children.map((agent) => agent.name), ["reviewer"])
+  assert.deepEqual(normalizeModelCatalog({ data: [
+    { providerID: "p", id: "model/with/slash", enabled: true, variants: [{ id: "high" }, { id: "none" }] },
+    { providerID: "p", id: "disabled", enabled: false, variants: [] },
+  ] }), [{ id: "p", models: [{ id: "model/with/slash", variants: ["high", "none"] }] }])
+  pass("shouldPreserveV2AgentIdsPermissionsAndEnabledModelVariants")
 }
 
-async function shouldRestoreHeldDescriptorEditWhenConcurrentEditPrecedesGlobalFallback(): Promise<void> {
-  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-hot-apply."))
+async function shouldPreserveNativeV2ConfigAndRemoveOverriddenLegacyAssignments(): Promise<void> {
+  const scratch = await mkdtemp(path.join(tmpdir(), "models-v2-native."))
   try {
-    // Given
-    const file = path.join(scratch, CONFIG_FILE_NAME)
-    await writeFile(file, GLOBAL_CONFIG_BYTES, { mode: CONFIG_FILE_MODE })
-    const snapshot = await readConfigSnapshot(file)
-    const heldFile = await open(file, "r+")
-    try {
-      const originalMetadata = await heldFile.stat()
-      let patchCalls = 0
-      let heldMutation = emptyHeldClaimMutationEvidence()
-      const client = {
-        global: {
-          config: {
-            update: async () => {
-              patchCalls += 1
-              heldMutation = await overwriteRetainedClaimThroughHandle(
-                scratch,
-                file,
-                heldFile,
-                originalMetadata,
-                GLOBAL_EXTERNAL_EDIT_BYTES,
-              )
-              return { error: { name: "BadRequest" }, response: { status: 400 } }
-            },
-          },
-        },
-      }
-      const runtime = { config: scratch, worktree: "/work/project", directory: "/work/project" }
-      const changes: AgentChange[] = [
-        { agent: "alpha", before: { model: "openai/old" }, after: { model: "openai/new" }, action: "set" },
-        { agent: "beta", before: { model: "anthropic/old" }, after: {}, action: "inherit" },
-      ]
-      const hookOccurrences = persistenceHookCounts()
-      let failure: unknown
-
-      // When
-      try {
-        await applyConfigChanges(client, "global", runtime, snapshot, changes, {
-          before(step) {
-            hookOccurrences[step] += 1
-          },
-        })
-      } catch (error) {
-        failure = error
-      }
-
-      // Then
-      assert.deepEqual(
-        {
-          rejection: {
-            aggregate: failure instanceof AggregateError,
-            message: failure instanceof Error ? failure.message : failure,
-            causes: failure instanceof AggregateError
-              ? failure.errors.map((error) => (error instanceof Error ? error.message : String(error)))
-              : [],
-          },
-          heldMutation,
-          patchCalls,
-          hookOccurrences,
-          bytes: await readFile(file),
-          mode: (await stat(file)).mode & 0o777,
-          entries: (await readdir(scratch)).sort(),
-        },
-        {
-          rejection: {
-            aggregate: false,
-            message: `${file} changed while the configurator was open; reload and retry`,
-            causes: [],
-          },
-          heldMutation: {
-            descriptorKeptOriginalInode: true,
-            descriptorBecameRetainedClaim: true,
-            descriptorDetachedFromDestination: true,
-            destinationWasNotReplaced: true,
-          },
-          patchCalls: 1,
-          hookOccurrences: {
-            "temporary-open": 1,
-            "temporary-write": 1,
-            "temporary-flush": 1,
-            rename: 1,
-            "destination-flush": 1,
-            "post-validate": 1,
-            "recovery-restore": 0,
-            "ownership-release": 0,
-          },
-          bytes: GLOBAL_EXTERNAL_EDIT_BYTES,
-          mode: CONFIG_FILE_MODE,
-          entries: [CONFIG_FILE_NAME],
-        },
-      )
-      pass("shouldRestoreHeldDescriptorEditWhenConcurrentEditPrecedesGlobalFallback")
-    } finally {
-      await heldFile.close()
-    }
-  } finally {
-    await rm(scratch, { recursive: true, force: true })
-  }
-}
-
-async function shouldTransferFallbackOwnershipBeforeHeldClaimChanges(): Promise<void> {
-  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-hot-apply."))
-  try {
-    // Given
-    const file = path.join(scratch, CONFIG_FILE_NAME)
-    await writeFile(file, GLOBAL_CONFIG_BYTES, { mode: CONFIG_FILE_MODE })
-    const snapshot = await readConfigSnapshot(file)
-    const heldFile = await open(file, "r+")
-    try {
-      const originalMetadata = await heldFile.stat()
-      let patchCalls = 0
-      const client = {
-        global: {
-          config: {
-            update: async () => {
-              patchCalls += 1
-              return { error: { name: "BadRequest" }, response: { status: 400 } }
-            },
-          },
-        },
-      }
-      const runtime = { config: scratch, worktree: "/work/project", directory: "/work/project" }
-      const changes: AgentChange[] = [
-        { agent: "alpha", before: { model: "openai/old" }, after: { model: "openai/new" }, action: "set" },
-        { agent: "beta", before: { model: "anthropic/old" }, after: {}, action: "inherit" },
-      ]
-      const hookOccurrences = persistenceHookCounts()
-      let heldMutation = emptyHeldClaimMutationEvidence()
-      let fallbackIdentityAtCheckpoint: Awaited<ReturnType<typeof stat>> | undefined
-      let fallbackBytesAtCheckpoint: Buffer | undefined
-      let failure: unknown
-
-      // When
-      try {
-        await applyConfigChanges(client, "global", runtime, snapshot, changes, {
-          async before(step) {
-            hookOccurrences[step] += 1
-            if (step !== "ownership-release") return
-            fallbackIdentityAtCheckpoint = await stat(file)
-            fallbackBytesAtCheckpoint = await readFile(file)
-            heldMutation = await overwriteRetainedClaimThroughHandle(
-              scratch,
-              file,
-              heldFile,
-              originalMetadata,
-              GLOBAL_EXTERNAL_EDIT_BYTES,
-            )
-          },
-        })
-      } catch (error) {
-        failure = error
-      }
-
-      // Then
-      const finalDestinationIdentity = await stat(file)
-      assert.deepEqual(
-        {
-          rejection: {
-            aggregate: failure instanceof AggregateError,
-            message: failure instanceof Error ? failure.message : failure,
-            causes: failure instanceof AggregateError
-              ? failure.errors.map((error) => (error instanceof Error ? error.message : String(error)))
-              : [],
-          },
-          heldMutation,
-          patchCalls,
-          hookOccurrences,
-          fallbackBytesAtCheckpoint,
-          finalBytes: await readFile(file),
-          finalMode: finalDestinationIdentity.mode & 0o777,
-          finalIdentityIsHeldClaim: sameFileIdentity(originalMetadata, finalDestinationIdentity),
-          finalIdentityDiffersFromFallback: fallbackIdentityAtCheckpoint
-            ? !sameFileIdentity(fallbackIdentityAtCheckpoint, finalDestinationIdentity)
-            : false,
-          entries: (await readdir(scratch)).sort(),
-        },
-        {
-          rejection: {
-            aggregate: false,
-            message: `${file} changed while the configurator was open; reload and retry`,
-            causes: [],
-          },
-          heldMutation: {
-            descriptorKeptOriginalInode: true,
-            descriptorBecameRetainedClaim: true,
-            descriptorDetachedFromDestination: true,
-            destinationWasNotReplaced: true,
-          },
-          patchCalls: 1,
-          hookOccurrences: {
-            "temporary-open": 2,
-            "temporary-write": 2,
-            "temporary-flush": 2,
-            rename: 2,
-            "destination-flush": 2,
-            "post-validate": 2,
-            "recovery-restore": 0,
-            "ownership-release": 1,
-          },
-          fallbackBytesAtCheckpoint: GLOBAL_FALLBACK_BYTES,
-          finalBytes: GLOBAL_EXTERNAL_EDIT_BYTES,
-          finalMode: CONFIG_FILE_MODE,
-          finalIdentityIsHeldClaim: true,
-          finalIdentityDiffersFromFallback: true,
-          entries: [CONFIG_FILE_NAME],
-        },
-      )
-      pass("shouldTransferFallbackOwnershipBeforeHeldClaimChanges")
-    } finally {
-      await heldFile.close()
-    }
-  } finally {
-    await rm(scratch, { recursive: true, force: true })
-  }
-}
-
-async function shouldRestoreOriginalSnapshotWhenGlobalPatchAndFallbackFail(): Promise<void> {
-  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-hot-apply."))
-  try {
-    // Given
     const file = path.join(scratch, "opencode.jsonc")
-    const original = '{\n  "agent": {\n    "alpha": {"model": "openai/old"},\n    "beta": {"model": "anthropic/old"}\n  }\n}\n'
-    await writeFile(file, original)
+    await writeFile(file, `{
+      // Keep settings and comments.
+      "agent": {"legacy": {"model":"p/old","description":"legacy settings"}, "build":{"model":"p/shadowed","variant":"low"}},
+      "agents": {"build":{"model":{"providerID":"p","model":"old/with/slash","variant":"high"},"system":"keep"}},
+      "foreign": true
+    }`)
     const snapshot = await readConfigSnapshot(file)
-    const client = {
-      global: {
-        config: {
-          update: async () => ({ error: { name: "BadRequest" }, response: { status: 400 } }),
-        },
-      },
-    }
-    const runtime = { config: scratch, worktree: "/work/project", directory: "/work/project" }
-    const changes: AgentChange[] = [
-      { agent: "alpha", before: { model: "openai/old" }, after: { model: "openai/new" }, action: "set" },
-      { agent: "beta", before: { model: "anthropic/old" }, after: {}, action: "inherit" },
-    ]
-    let preludeOpened = false
-
-    // When
-    await assert.rejects(
-      () =>
-        applyConfigChanges(client, "global", runtime, snapshot, changes, {
-          before(step) {
-            if (step !== "temporary-open") return
-            if (preludeOpened) throw new Error("injected fallback failure")
-            preludeOpened = true
-          },
-        }),
-      /injected fallback failure/,
-    )
-
-    // Then
-    assert.deepEqual(
-      { content: await readFile(file, "utf8"), entries: await readdir(scratch) },
-      { content: original, entries: ["opencode.jsonc"] },
-    )
-    pass("shouldRestoreOriginalSnapshotWhenGlobalPatchAndFallbackFail")
-  } finally {
-    await rm(scratch, { recursive: true, force: true })
-  }
+    assert.equal(snapshot.mappings.build.model, "p/old/with/slash")
+    const rendered = renderConfigChanges(snapshot, [
+      {agent:"build",before:snapshot.mappings.build,after:{model:"q/new/with/slash"},action:"set"},
+      {agent:"legacy",before:snapshot.mappings.legacy,after:{model:"q/new"},action:"set"},
+    ])
+    assert.match(rendered, /Keep settings and comments/)
+    const config = JSON.parse(rendered.replace('// Keep settings and comments.', ''))
+    assert.deepEqual(config.agents.build, { model: { providerID:"q", model:"new/with/slash" }, system:"keep" })
+    assert.deepEqual(config.agent.legacy, {model:"q/new",description:"legacy settings"})
+    const inherited = renderConfigChanges(snapshot,[{agent:"build",before:snapshot.mappings.build,after:{},action:"inherit"}])
+    const parsed = JSON.parse(inherited.replace('// Keep settings and comments.',''))
+    assert.equal(parsed.agent.build, undefined)
+    assert.deepEqual(parsed.agents.build,{system:"keep"})
+    assert.equal(parsed.foreign,true)
+    const fresh = renderConfigChanges({file,exists:false,content:"{}",mode:0o600,mappings:{}},[{agent:"build",before:{},after:{model:"q/new",variant:"high"},action:"set"}])
+    assert.deepEqual(JSON.parse(fresh),{agents:{build:{model:{providerID:"q",model:"new",variant:"high"}}}})
+    pass("shouldPreserveNativeV2ConfigAndRemoveOverriddenLegacyAssignments")
+  } finally { await rm(scratch,{recursive:true,force:true}) }
 }
 
-async function shouldKeepLivePublicationWhenRetainedClaimIsMissingDuringRollback(): Promise<void> {
-  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-hot-apply."))
+async function shouldResolveV2HostLocationAtCommandTime(): Promise<void> {
+  const host = createConfiguratorHost({
+    location: undefined,
+    data: { location: { default: () => ({ directory: "/project/package" }) } },
+    client: {}, ui: {},
+  } as unknown as Context)
+  assert.equal(host.paths.directory, "/project/package")
+  assert.equal(host.paths.worktree, "/project/package")
+  assert.equal(host.paths.config, process.env.OPENCODE_CONFIG_DIR || path.join(process.env.XDG_CONFIG_HOME || path.join(homedir(), ".config"), "opencode"))
+  let directory = "/current/first"
+  const context = {
+    get location() { return { directory } },
+    data: { location: { default() { throw new Error("current location should take precedence") } } },
+    client: {}, ui: {},
+  } as unknown as Context
+  assert.equal(createConfiguratorHost(context).paths.directory, directory)
+  directory = "/current/second"
+  assert.equal(createConfiguratorHost(context).paths.directory, directory)
+  const previousConfigDir = process.env.OPENCODE_CONFIG_DIR
   try {
-    // Given
-    const file = path.join(scratch, CONFIG_FILE_NAME)
-    await writeFile(file, GLOBAL_CONFIG_BYTES, { mode: CONFIG_FILE_MODE })
-    const snapshot = await readConfigSnapshot(file)
-    const client = {
-      global: {
-        config: {
-          update: async () => ({ error: { name: "BadRequest" }, response: { status: 400 } }),
-        },
-      },
-    }
-    const runtime = { config: scratch, worktree: "/work/project", directory: "/work/project" }
-    const changes: AgentChange[] = [
-      { agent: "alpha", before: { model: "openai/old" }, after: { model: "openai/new" }, action: "set" },
-      { agent: "beta", before: { model: "anthropic/old" }, after: {}, action: "inherit" },
-    ]
-    const hookOccurrences = persistenceHookCounts()
-    let publicationIdentityAtCheckpoint: Awaited<ReturnType<typeof stat>> | undefined
-    let destinationBytesAtCheckpoint: Buffer | undefined
-    let failure: unknown
-
-    // When
-    try {
-      await applyConfigChanges(client, "global", runtime, snapshot, changes, {
-        async before(step) {
-          hookOccurrences[step] += 1
-          if (step !== "temporary-open" || hookOccurrences[step] !== 2) return
-          const operationDirectory = await configWriteDirectory(scratch)
-          await rm(path.join(operationDirectory, CONFIG_WRITE_CLAIM_NAME))
-          publicationIdentityAtCheckpoint = await stat(file)
-          destinationBytesAtCheckpoint = await readFile(file)
-          throw new Error(INJECTED_FALLBACK_FAILURE)
-        },
-      })
-    } catch (error) {
-      failure = error
-    }
-
-    // Then
-    const finalDestinationIdentity = await stat(file)
-    assert.deepEqual(
-      {
-        rejection: {
-          aggregate: failure instanceof AggregateError,
-          message: failure instanceof Error ? failure.message : failure,
-          causes: failure instanceof AggregateError
-            ? failure.errors.map((error) => (error instanceof Error ? error.message : String(error)))
-            : [],
-        },
-        hookOccurrences,
-        destinationBytesAtCheckpoint,
-        destinationBytes: await readFile(file),
-        destinationMode: finalDestinationIdentity.mode & 0o777,
-        publicationIdentityPreserved: publicationIdentityAtCheckpoint
-          ? sameFileIdentity(publicationIdentityAtCheckpoint, finalDestinationIdentity)
-          : false,
-        entries: (await readdir(scratch)).sort(),
-      },
-      {
-        rejection: {
-          aggregate: true,
-          message: `${file} apply failed and the original snapshot could not be restored`,
-          causes: [
-            INJECTED_FALLBACK_FAILURE,
-            `${file} rollback conflict: configuration changed after the plugin write; preserving newer content`,
-          ],
-        },
-        hookOccurrences: {
-          "temporary-open": 2,
-          "temporary-write": 1,
-          "temporary-flush": 1,
-          rename: 1,
-          "destination-flush": 1,
-          "post-validate": 1,
-          "recovery-restore": 0,
-          "ownership-release": 0,
-        },
-        destinationBytesAtCheckpoint: GLOBAL_PRELUDE_BYTES,
-        destinationBytes: GLOBAL_PRELUDE_BYTES,
-        destinationMode: CONFIG_FILE_MODE,
-        publicationIdentityPreserved: true,
-        entries: [CONFIG_FILE_NAME],
-      },
-    )
-    pass("shouldKeepLivePublicationWhenRetainedClaimIsMissingDuringRollback")
+    process.env.OPENCODE_CONFIG_DIR = "/custom/opencode"
+    assert.equal(createConfiguratorHost(context).paths.config, "/custom/opencode")
   } finally {
-    await rm(scratch, { recursive: true, force: true })
+    if (previousConfigDir === undefined) delete process.env.OPENCODE_CONFIG_DIR
+    else process.env.OPENCODE_CONFIG_DIR = previousConfigDir
   }
-}
-
-async function shouldKeepLivePublicationWhenRetainedClaimDisappearsBeforeRelease(): Promise<void> {
-  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-hot-apply."))
-  try {
-    // Given
-    const file = path.join(scratch, CONFIG_FILE_NAME)
-    await writeFile(file, GLOBAL_CONFIG_BYTES, { mode: CONFIG_FILE_MODE })
-    const snapshot = await readConfigSnapshot(file)
-    let patchCalls = 0
-    let publicationIdentityAtCheckpoint: Awaited<ReturnType<typeof stat>> | undefined
-    let destinationBytesAtCheckpoint: Buffer | undefined
-    const client = {
-      global: {
-        config: {
-          update: async () => {
-            patchCalls += 1
-            const operationDirectory = await configWriteDirectory(scratch)
-            await rm(path.join(operationDirectory, CONFIG_WRITE_CLAIM_NAME))
-            publicationIdentityAtCheckpoint = await stat(file)
-            destinationBytesAtCheckpoint = await readFile(file)
-            return { data: {} }
-          },
-        },
-      },
-    }
-    const runtime = { config: scratch, worktree: "/work/project", directory: "/work/project" }
-    const changes: AgentChange[] = [
-      { agent: "alpha", before: { model: "openai/old" }, after: { model: "openai/new" }, action: "set" },
-      { agent: "beta", before: { model: "anthropic/old" }, after: {}, action: "inherit" },
-    ]
-    const hookOccurrences = persistenceHookCounts()
-    let failure: unknown
-
-    // When
-    try {
-      await applyConfigChanges(client, "global", runtime, snapshot, changes, {
-        before(step) {
-          hookOccurrences[step] += 1
-        },
-      })
-    } catch (error) {
-      failure = error
-    }
-
-    // Then
-    const finalDestinationIdentity = await stat(file)
-    assert.deepEqual(
-      {
-        rejection: {
-          aggregate: failure instanceof AggregateError,
-          message: failure instanceof Error ? failure.message : failure,
-          causes: failure instanceof AggregateError
-            ? failure.errors.map((error) => (error instanceof Error ? error.message : String(error)))
-            : [],
-        },
-        patchCalls,
-        hookOccurrences,
-        destinationBytesAtCheckpoint,
-        destinationBytes: await readFile(file),
-        destinationMode: finalDestinationIdentity.mode & 0o777,
-        publicationIdentityPreserved: publicationIdentityAtCheckpoint
-          ? sameFileIdentity(publicationIdentityAtCheckpoint, finalDestinationIdentity)
-          : false,
-        entries: (await readdir(scratch)).sort(),
-      },
-      {
-        rejection: {
-          aggregate: false,
-          message: `${file} changed while the configurator was open; reload and retry`,
-          causes: [],
-        },
-        patchCalls: 1,
-        hookOccurrences: {
-          "temporary-open": 1,
-          "temporary-write": 1,
-          "temporary-flush": 1,
-          rename: 1,
-          "destination-flush": 1,
-          "post-validate": 1,
-          "recovery-restore": 0,
-          "ownership-release": 0,
-        },
-        destinationBytesAtCheckpoint: GLOBAL_PRELUDE_BYTES,
-        destinationBytes: GLOBAL_PRELUDE_BYTES,
-        destinationMode: CONFIG_FILE_MODE,
-        publicationIdentityPreserved: true,
-        entries: [CONFIG_FILE_NAME],
-      },
-    )
-    pass("shouldKeepLivePublicationWhenRetainedClaimDisappearsBeforeRelease")
-  } finally {
-    await rm(scratch, { recursive: true, force: true })
-  }
-}
-
-async function shouldPreserveConcurrentEditWhenGlobalRollbackConflicts(): Promise<void> {
-  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-hot-apply."))
-  try {
-    // Given
-    const file = path.join(scratch, CONFIG_FILE_NAME)
-    await writeFile(file, GLOBAL_CONFIG_BYTES, { mode: CONFIG_FILE_MODE })
-    const snapshot = await readConfigSnapshot(file)
-    let patchCalls = 0
-    const client = {
-      global: {
-        config: {
-          update: async () => {
-            patchCalls += 1
-            return { error: { name: "BadRequest" }, response: { status: 400 } }
-          },
-        },
-      },
-    }
-    const runtime = { config: scratch, worktree: "/work/project", directory: "/work/project" }
-    const changes: AgentChange[] = [
-      { agent: "alpha", before: { model: "openai/old" }, after: { model: "openai/new" }, action: "set" },
-      { agent: "beta", before: { model: "anthropic/old" }, after: {}, action: "inherit" },
-    ]
-    const hookOccurrences = persistenceHookCounts()
-    let failure: unknown
-
-    // When
-    try {
-      await applyConfigChanges(client, "global", runtime, snapshot, changes, {
-        async before(step) {
-          hookOccurrences[step] += 1
-          if (step !== "temporary-open" || hookOccurrences[step] !== 2) return
-          await writeFile(file, GLOBAL_EXTERNAL_EDIT_BYTES)
-          throw new Error(INJECTED_FALLBACK_FAILURE)
-        },
-      })
-    } catch (error) {
-      failure = error
-    }
-
-    // Then
-    assert.deepEqual(
-      {
-        rejection: {
-          aggregate: failure instanceof AggregateError,
-          message: failure instanceof Error ? failure.message : failure,
-          causes: failure instanceof AggregateError
-            ? failure.errors.map((error) => (error instanceof Error ? error.message : String(error)))
-            : [],
-        },
-        patchCalls,
-        hookOccurrences,
-        bytes: await readFile(file),
-        mode: (await stat(file)).mode & 0o777,
-        entries: (await readdir(scratch)).sort(),
-      },
-      {
-        rejection: {
-          aggregate: true,
-          message: `${file} apply failed and the original snapshot could not be restored`,
-          causes: [
-            INJECTED_FALLBACK_FAILURE,
-            `${file} rollback conflict: configuration changed after the plugin write; preserving newer content`,
-          ],
-        },
-        patchCalls: 1,
-        hookOccurrences: {
-          "temporary-open": 2,
-          "temporary-write": 1,
-          "temporary-flush": 1,
-          rename: 1,
-          "destination-flush": 1,
-          "post-validate": 1,
-          "recovery-restore": 0,
-          "ownership-release": 0,
-        },
-        bytes: GLOBAL_EXTERNAL_EDIT_BYTES,
-        mode: CONFIG_FILE_MODE,
-        entries: [CONFIG_FILE_NAME],
-      },
-    )
-    pass("shouldPreserveConcurrentEditWhenGlobalRollbackConflicts")
-  } finally {
-    await rm(scratch, { recursive: true, force: true })
-  }
-}
-
-async function shouldRestoreHeldDescriptorEditWhenGlobalRollbackFindsMutatedClaim(): Promise<void> {
-  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-hot-apply."))
-  try {
-    // Given
-    const file = path.join(scratch, CONFIG_FILE_NAME)
-    await writeFile(file, GLOBAL_CONFIG_BYTES, { mode: CONFIG_FILE_MODE })
-    const snapshot = await readConfigSnapshot(file)
-    const heldFile = await open(file, "r+")
-    try {
-      const originalMetadata = await heldFile.stat()
-      let patchCalls = 0
-      const client = {
-        global: {
-          config: {
-            update: async () => {
-              patchCalls += 1
-              return { error: { name: "BadRequest" }, response: { status: 400 } }
-            },
-          },
-        },
-      }
-      const runtime = { config: scratch, worktree: "/work/project", directory: "/work/project" }
-      const changes: AgentChange[] = [
-        { agent: "alpha", before: { model: "openai/old" }, after: { model: "openai/new" }, action: "set" },
-        { agent: "beta", before: { model: "anthropic/old" }, after: {}, action: "inherit" },
-      ]
-      const hookOccurrences = persistenceHookCounts()
-      let heldMutation = emptyHeldClaimMutationEvidence()
-      let failure: unknown
-
-      // When
-      try {
-        await applyConfigChanges(client, "global", runtime, snapshot, changes, {
-          async before(step) {
-            hookOccurrences[step] += 1
-            if (step !== "temporary-open" || hookOccurrences[step] !== 2) return
-            heldMutation = await overwriteRetainedClaimThroughHandle(
-              scratch,
-              file,
-              heldFile,
-              originalMetadata,
-              GLOBAL_EXTERNAL_EDIT_BYTES,
-            )
-            throw new Error(INJECTED_FALLBACK_FAILURE)
-          },
-        })
-      } catch (error) {
-        failure = error
-      }
-
-      // Then
-      assert.deepEqual(
-        {
-          rejection: {
-            aggregate: failure instanceof AggregateError,
-            message: failure instanceof Error ? failure.message : failure,
-            causes: failure instanceof AggregateError
-              ? failure.errors.map((error) => (error instanceof Error ? error.message : String(error)))
-              : [],
-          },
-          heldMutation,
-          patchCalls,
-          hookOccurrences,
-          bytes: await readFile(file),
-          mode: (await stat(file)).mode & 0o777,
-          entries: (await readdir(scratch)).sort(),
-        },
-        {
-          rejection: {
-            aggregate: true,
-            message: `${file} apply failed and the original snapshot could not be restored`,
-            causes: [
-              INJECTED_FALLBACK_FAILURE,
-              `${file} rollback conflict: configuration changed after the plugin write; preserving newer content`,
-            ],
-          },
-          heldMutation: {
-            descriptorKeptOriginalInode: true,
-            descriptorBecameRetainedClaim: true,
-            descriptorDetachedFromDestination: true,
-            destinationWasNotReplaced: true,
-          },
-          patchCalls: 1,
-          hookOccurrences: {
-            "temporary-open": 2,
-            "temporary-write": 1,
-            "temporary-flush": 1,
-            rename: 1,
-            "destination-flush": 1,
-            "post-validate": 1,
-            "recovery-restore": 0,
-            "ownership-release": 0,
-          },
-          bytes: GLOBAL_EXTERNAL_EDIT_BYTES,
-          mode: CONFIG_FILE_MODE,
-          entries: [CONFIG_FILE_NAME],
-        },
-      )
-      pass("shouldRestoreHeldDescriptorEditWhenGlobalRollbackFindsMutatedClaim")
-    } finally {
-      await heldFile.close()
-    }
-  } finally {
-    await rm(scratch, { recursive: true, force: true })
-  }
-}
-
-async function shouldReportRestartFallbackWhenClientLacksHotApplyRoutes(): Promise<void> {
-  const scratch = await mkdtemp(path.join(tmpdir(), "model-configurator-hot-apply."))
-  try {
-    // Given clients without the disposal and global config update capabilities
-    const file = path.join(scratch, "opencode.jsonc")
-    await writeFile(file, '{\n  "agent": {\n    "alpha": {"model": "openai/old"}\n  }\n}\n')
-    const runtime = { config: scratch, worktree: "/work/project", directory: "/work/project" }
-    const changes: AgentChange[] = [
-      { agent: "alpha", before: { model: "openai/old" }, after: { model: "openai/new" }, action: "set" },
-    ]
-
-    // When / Then the write still lands and the outcome degrades to restart guidance
-    const project = await applyConfigChanges({}, "project", runtime, await readConfigSnapshot(file), changes)
-    assert.equal(project.hotApplied, false)
-    assert.equal(project.detail?.includes("instance disposal"), true)
-    assert.deepEqual((await readConfigSnapshot(file)).mappings, { alpha: { model: "openai/new", variant: undefined } })
-
-    const back: AgentChange[] = [
-      { agent: "alpha", before: { model: "openai/new" }, after: { model: "openai/old" }, action: "set" },
-    ]
-    const global = await applyConfigChanges({}, "global", runtime, await readConfigSnapshot(file), back)
-    assert.equal(global.hotApplied, false)
-    assert.equal(global.detail?.includes("global config route"), true)
-    assert.deepEqual((await readConfigSnapshot(file)).mappings, { alpha: { model: "openai/old", variant: undefined } })
-    pass("shouldReportRestartFallbackWhenClientLacksHotApplyRoutes")
-  } finally {
-    await rm(scratch, { recursive: true, force: true })
-  }
-}
-
-async function shouldToastLiveApplyWhenProjectInstanceDisposalSucceeds(): Promise<void> {
-  const scratch = await createWizardFixture()
-  try {
-    // Given a wizard client that can dispose the project instance
-    const toasts: TuiToast[] = []
-    class FakeInstanceGroup {
-      disposedDirectories: string[] = []
-      async dispose(parameters: { directory: string }) {
-        this.disposedDirectories.push(parameters.directory)
-        return { data: true }
-      }
-    }
-    const instanceGroup = new FakeInstanceGroup()
-    const api = createFakeApi(scratch, toasts, {
-      select(title, options) {
-        if (title === "Configuration scope") return option(options, "project")
-        if (title === "Agents") return option(options, "default")
-        if (title === "Tier: high") return option(options, "openai/new")
-        if (title === "Variant for openai/new") return option(options, "high")
-        if (title === "Tier: low") return option(options, "__keep_current__")
-        if (title === "Individual overrides") return option(options, "__override_no__")
-        if (title.startsWith("Apply ")) return option(options, "__create_preset__")
-        throw new Error(`unexpected select dialog: ${title}`)
-      },
-      confirm() {
-        return true
-      },
-    })
-    ;(api.client as unknown as Record<string, unknown>).instance = instanceGroup
-
-    // When
-    await runModelConfigurator(api, scratch.profiles)
-
-    // Then the success toast reports a live apply and the project instance was disposed
-    assert.deepEqual(instanceGroup.disposedDirectories, [scratch.project])
-    assert.equal(toasts.at(-1)?.variant, "success")
-    assert.equal(toasts.at(-1)?.message?.includes("Applied live"), true)
-    pass("shouldToastLiveApplyWhenProjectInstanceDisposalSucceeds")
-  } finally {
-    await rm(scratch.root, { recursive: true, force: true })
-  }
+  pass("shouldResolveV2HostLocationAtCommandTime")
 }
 
 async function shouldShortenConfigFilePathsForDisplay(): Promise<void> {
@@ -4754,9 +3860,10 @@ function toServerAgent(agent: FixtureAgent): Record<string, unknown> {
     mode: agent.mode ?? "subagent",
     native: agent.native ?? false,
     hidden: agent.hidden ?? false,
-    permission: [
-      { permission: "*", pattern: "*", action: "allow" },
-      ...(agent.task ?? []).map((rule) => ({ permission: "task", pattern: rule.pattern, action: rule.action })),
+    id: agent.name,
+    permissions: [
+      { action: "*", resource: "*", effect: "allow" },
+      ...(agent.task ?? []).map((rule) => ({ action: "subagent", resource: rule.pattern, effect: rule.action })),
     ],
   }
 }
@@ -4765,81 +3872,43 @@ function createFakeApi(
   fixture: WizardFixture,
   toasts: TuiToast[],
   policy: DialogPolicy,
-): TuiPluginApi {
-  let currentOnClose: (() => void) | undefined
-  const dialog = {
-    replace(render: () => unknown, onClose?: () => void) {
-      currentOnClose = onClose
-      render()
-    },
-    clear() {},
-    setSize() {},
-    size: "medium" as const,
-    depth: 0,
-    open: false,
-  }
+): ConfiguratorHost {
   const api = {
-    state: {
-      ready: true,
-      path: { state: fixture.root, config: fixture.global, worktree: fixture.project, directory: fixture.project },
-    },
+    paths: { config: fixture.global, worktree: fixture.project, directory: fixture.project },
     client: {
-      app: {
-        async agents() {
-          return { data: fixture.agents.map(toServerAgent) }
-        },
-      },
-      provider: {
-        async list() {
-          return {
-            data: {
-              connected: ["openai", "anthropic"],
-              all: [
-                { id: "openai", models: { new: { variants: { high: {}, low: {}, none: {} } } } },
-                { id: "anthropic", models: { old: { variants: {} } } },
-              ],
-            },
-          }
-        },
-      },
+      agent: { async list(input: { location: { directory: string } }) {
+        assert.equal(input.location.directory, fixture.project)
+        return { data: fixture.agents.map(toServerAgent) }
+      } },
+      model: { async list(input: { location: { directory: string } }) {
+        assert.equal(input.location.directory, fixture.project)
+        return { data: [
+          { providerID: "openai", id: "new", enabled: true, variants: [{ id: "high" }, { id: "low" }, { id: "none" }] },
+          { providerID: "anthropic", id: "old", enabled: true, variants: [] },
+        ] }
+      } },
     },
     ui: {
-      dialog,
-      toast(input: TuiToast) {
-        toasts.push(input)
-      },
-      DialogSelect<Value extends string>(props: TuiDialogSelectProps<Value>) {
-        const onClose = currentOnClose
-        queueMicrotask(() => {
+      toast: { show(input: TuiToast) { toasts.push(input) } },
+      dialog: {
+        clear() {}, set() {},
+        async select<Value extends string>(props: DialogSelectOptions<Value>) {
           const answer = policy.select(props.title, props.options as unknown as PolicyOption[], props.current as string | undefined)
-          if (answer === "escape") onClose?.()
-          else props.onSelect?.(answer as TuiDialogSelectProps<Value>["options"][number])
-        })
-        return undefined
-      },
-      DialogConfirm(props: TuiDialogConfirmProps) {
-        const onClose = currentOnClose
-        queueMicrotask(() => {
+          return answer === "escape" ? undefined : answer.value
+        },
+        async confirm(props: DialogConfirmOptions) {
           const answer = policy.confirm(props.title)
-          if (answer === "escape") onClose?.()
-          else if (answer) props.onConfirm?.()
-          else props.onCancel?.()
-        })
-        return undefined
-      },
-      DialogPrompt(props: TuiDialogPromptProps) {
-        const onClose = currentOnClose
-        queueMicrotask(() => {
+          return answer === "escape" ? undefined : answer
+        },
+        async prompt(props: DialogPromptOptions) {
           if (!policy.prompt && props.title !== "Preset name") throw new Error(`unexpected prompt dialog: ${props.title}`)
           const answer = policy.prompt ? policy.prompt(props.title, props.value) : DEFAULT_TEST_PRESET_NAME
-          if (answer === "escape") onClose?.()
-          else props.onConfirm?.(answer)
-        })
-        return undefined
+          return answer === "escape" ? undefined : answer
+        },
       },
     },
   }
-  return api as unknown as TuiPluginApi
+  return api as unknown as ConfiguratorHost
 }
 
 function option<Value extends string>(
@@ -4977,7 +4046,6 @@ await shouldDeclareEveryExampleRootKeyWhenProfileSchemaIsStrict()
 await shouldValidateProfileAsWholeContractWhenProfileIsComplete()
 await shouldRejectDuplicateAndMalformedAgentsWhenProfileIsInvalid()
 await shouldKeepKnownAgentsAndWarnWhenTierReferencesAgentsMissingOnThisServer()
-await shouldExposeOnlyConnectedProvidersWhenCatalogContainsDisconnectedEntries()
 await shouldCalculateOnlyChangedAssignmentsWhenDecisionsMixActions()
 await shouldFormatMappingCompactlyWithAtVariant()
 await shouldPreserveForeignJsoncWhenRenderingAssignmentChanges()
@@ -5048,20 +4116,9 @@ await shouldConfigureAgentsWhenProfilesDirectoryIsMissing()
 await shouldSkipInvalidProfileWithWarningAndKeepTheRest()
 await shouldStopWithGuidanceWhenServerCannotListAgents()
 await shouldPartitionPresetAssignmentsByLiveCatalog()
-await shouldPlanGlobalHotApplyAsPatchWithLocalPreludeForDeletions()
-await shouldPlanWriteOnlyWhenGlobalChangesAreRemovalOnly()
-await shouldHotApplyProjectScopeByDisposingTheProjectInstance()
-await shouldHotApplyGlobalScopeViaConfigPatchAfterLocalDeletions()
-await shouldFallBackToLocalWriteWhenGlobalPatchFails()
-await shouldRejectWithoutClobberWhenConcurrentEditPrecedesGlobalFallback()
-await shouldRestoreHeldDescriptorEditWhenConcurrentEditPrecedesGlobalFallback()
-await shouldTransferFallbackOwnershipBeforeHeldClaimChanges()
-await shouldRestoreOriginalSnapshotWhenGlobalPatchAndFallbackFail()
-await shouldKeepLivePublicationWhenRetainedClaimIsMissingDuringRollback()
-await shouldKeepLivePublicationWhenRetainedClaimDisappearsBeforeRelease()
-await shouldPreserveConcurrentEditWhenGlobalRollbackConflicts()
-await shouldRestoreHeldDescriptorEditWhenGlobalRollbackFindsMutatedClaim()
-await shouldReportRestartFallbackWhenClientLacksHotApplyRoutes()
-await shouldToastLiveApplyWhenProjectInstanceDisposalSucceeds()
+await shouldReloadBothScopesAfterDurableWriteAndRetainFilesOnReloadFailure()
+await shouldPreserveV2AgentIdsPermissionsAndEnabledModelVariants()
+await shouldPreserveNativeV2ConfigAndRemoveOverriddenLegacyAssignments()
+await shouldResolveV2HostLocationAtCommandTime()
 await shouldShortenConfigFilePathsForDisplay()
 process.stdout.write(`PASS: ${passes} TypeScript Models Presets contracts.\n`)

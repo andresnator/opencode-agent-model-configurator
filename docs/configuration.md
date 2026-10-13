@@ -22,7 +22,7 @@ The scope decides which OpenCode configuration file is changed.
 
 If no file exists, the plugin creates `opencode.json`. If both formats exist, it uses JSONC. The scope screen always shows the exact path.
 
-OpenCode supplies the global configuration directory. The fallback is `$XDG_CONFIG_HOME/opencode`, or `~/.config/opencode` when `XDG_CONFIG_HOME` is not set.
+OpenCode supplies the global configuration directory. V2 uses `OPENCODE_CONFIG_DIR` when set, otherwise `$XDG_CONFIG_HOME/opencode`, or `~/.config/opencode` when `XDG_CONFIG_HOME` is not set.
 
 ## Choose an action for each agent
 
@@ -47,17 +47,17 @@ Profiles are optional input. Presets are named saved results. The plugin never w
 
 ### Add profiles
 
-Set `profilesDir` in the plugin options in `tui.json`.
+Set `profilesDir` in the plugin options in `cli.json`.
 
 ```json
 {
-  "plugin": [
-    ["opencode-models-presets", {"profilesDir": ".opencode/model-profiles"}]
+  "plugins": [
+    {"package": "opencode-models-presets", "options": {"profilesDir": ".opencode/model-profiles"}}
   ]
 }
 ```
 
-The first tuple value remains the npm package spec. It may include an exact version, such as `opencode-models-presets@0.3.1`. Keep the options object when changing that version.
+The `package` value is the npm spec and may include an exact V2-compatible version. Keep the `options` object when changing it.
 
 | Value | Resolution |
 | --- | --- |
@@ -99,11 +99,11 @@ In that case, a file write can succeed without changing the value OpenCode uses.
 
 | Data | Plugin behavior |
 | --- | --- |
-| Project or global OpenCode configuration | Changes only selected `agent.<name>.model` and `agent.<name>.variant` values; keeps other keys, JSONC comments, and file mode |
+| Project or global OpenCode configuration | Changes only selected model assignments; preserves legacy `agent` entries and uses native `agents.<id>.model` references for V2 entries and new files; keeps other settings, JSONC comments, and file mode |
 | Global preset store | Saves named assignments in `model-configurator-presets.json` |
 | Global apply history | Records the last applied name by absolute configuration file path in `model-configurator-last-applied.json` after a successful apply |
 | Profile files | Reads only |
-| `tui.json` | Reads registration and `profilesDir`; never writes it |
+| `cli.json` | Reads registration and `profilesDir`; never writes it |
 
 The plugin never writes provider credentials.
 
@@ -121,7 +121,7 @@ Assignment writes protect existing data:
 
 | Message | Next step |
 | --- | --- |
-| Applied live | Current server is updated. Restart other running OpenCode processes. |
+| Applied live | All loaded locations on the connected server were reloaded; pending permissions and forms were cancelled. Reload other servers. |
 | Restart required | File was written. Restart affected OpenCode sessions. |
 | Preset saved, configuration not applied | Fix the reported file problem, reopen the plugin, and retry. |
 | Error before completion | Follow the reported error. Do not assume the write succeeded. |
