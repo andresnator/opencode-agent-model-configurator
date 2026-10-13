@@ -20,7 +20,9 @@ The scope decides which OpenCode configuration file is changed.
 | Project | Existing `.opencode/opencode.jsonc`, or `.opencode/opencode.json` | Current project |
 | Global | Existing `opencode.jsonc`, or `opencode.json`, in the global OpenCode configuration directory | All projects by default |
 
-If no file exists, the plugin creates `opencode.json`. If both formats exist, it uses JSONC. The scope screen always shows the exact path.
+Project files are resolved from the checkout root reported by OpenCode, including when the CLI starts in a subdirectory. If no file exists, the plugin creates `opencode.json`. If both formats exist, it uses JSONC. The scope screen always shows the exact path.
+
+The CLI and server must share the local filesystem. Before opening the wizard, the plugin verifies that the server can see a temporary local probe and removes it. Remote connections without shared storage are rejected before reading or changing configuration, presets, or history, including connections through a localhost tunnel.
 
 OpenCode supplies the global configuration directory. V2 uses `OPENCODE_CONFIG_DIR` when set, otherwise `$XDG_CONFIG_HOME/opencode`, or `~/.config/opencode` when `XDG_CONFIG_HOME` is not set.
 

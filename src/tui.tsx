@@ -24,7 +24,7 @@ export default Plugin.define({
         slash: { name: MODELS_PRESETS_SLASH_NAME },
         async run() {
           try {
-            const host = createConfiguratorHost(context)
+            const host = await createConfiguratorHost(context)
             const profilesRoot = await resolveProfilesRoot(import.meta.url, options.profilesDir, host.paths.directory)
             await runModelConfigurator(host, profilesRoot)
           } catch (error) {

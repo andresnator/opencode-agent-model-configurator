@@ -222,21 +222,40 @@ function isRecord(value) {
 }
 
 // src/host.ts
-import { homedir as homedir2 } from "node:os";
+import { randomBytes } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { homedir as homedir2, tmpdir } from "node:os";
 import path2 from "node:path";
-function createConfiguratorHost(context) {
+async function createConfiguratorHost(context) {
   const location = context.location ?? context.data.location.default();
   if (!location.directory) throw new Error("OpenCode has no active project directory. Open a project and retry.");
+  await assertSharedFilesystem(context.client, location);
+  const resolved = await context.client.location.get({ location }, { signal: AbortSignal.timeout(5e3) });
   return {
     paths: {
       directory: location.directory,
-      worktree: location.directory,
+      worktree: resolved.project.directory,
       // V2 Global.Service applies OPENCODE_CONFIG_DIR over the standard XDG root.
       config: process.env.OPENCODE_CONFIG_DIR || path2.join(process.env.XDG_CONFIG_HOME || path2.join(homedir2(), ".config"), "opencode")
     },
     client: context.client,
     ui: context.ui
   };
+}
+async function assertSharedFilesystem(client, location) {
+  const directory = await mkdtemp(path2.join(tmpdir(), "models-presets-local."));
+  const nonce = randomBytes(24).toString("hex");
+  try {
+    await writeFile(path2.join(directory, nonce), "", { flag: "wx", mode: 384 });
+    const result = await client.file.list({ location, path: directory }, { signal: AbortSignal.timeout(5e3) });
+    if (!result.data.some((entry) => entry.type === "file" && path2.resolve(result.location.directory, entry.path) === path2.join(directory, nonce))) {
+      throw new Error("Local filesystem probe did not match");
+    }
+  } catch (cause) {
+    throw new Error("Model presets require the CLI and server to share the local filesystem. Remote configuration is not supported; open OpenCode on the server machine.", { cause });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 }
 
 // src/options.ts
@@ -250,8 +269,8 @@ function isRecord2(value) {
 }
 
 // src/persistence.ts
-import { randomBytes } from "node:crypto";
-import { link, mkdir, open, readFile as readFile2, rm, rmdir, stat } from "node:fs/promises";
+import { randomBytes as randomBytes2 } from "node:crypto";
+import { link, mkdir, open, readFile as readFile2, rm as rm2, rmdir, stat } from "node:fs/promises";
 import { homedir as homedir3 } from "node:os";
 import path3 from "node:path";
 
@@ -1775,7 +1794,7 @@ async function writeConfigContent(snapshot, rendered, hooks = {}, options = {}) 
   } else if (await exists(snapshot.file)) {
     throw configWriteConflict(snapshot, conflictMessage);
   }
-  const suffix = `${timestamp()}-${randomBytes(3).toString("hex")}`;
+  const suffix = `${timestamp()}-${randomBytes2(3).toString("hex")}`;
   const operationDirectory = `${snapshot.file}.${suffix}.write`;
   const artifacts = {
     directory: operationDirectory,
@@ -2022,7 +2041,7 @@ async function cleanupWriteArtifacts(artifacts, ownership) {
 async function removePathWithIdentity(file, identity) {
   if (!await pathHasIdentity(file, identity)) return false;
   try {
-    await rm(file);
+    await rm2(file);
     return true;
   } catch (error) {
     if (isMissing(error)) return false;
@@ -2123,6 +2142,9 @@ function extractMappings(config) {
       if (container === "agents" && isRecord3(value.model)) {
         const model = typeof value.model.providerID === "string" && typeof value.model.model === "string" ? `${value.model.providerID}/${value.model.model}` : void 0;
         mappings[agent] = { model, variant: typeof value.model.variant === "string" ? value.model.variant : void 0 };
+      } else if (container === "agents" && typeof value.model === "string") {
+        const separator = value.model.indexOf("#");
+        mappings[agent] = separator < 0 ? { model: value.model, variant: void 0 } : { model: value.model.slice(0, separator), variant: value.model.slice(separator + 1) };
       } else {
         mappings[agent] = { model: typeof value.model === "string" ? value.model : void 0, variant: container === "agent" && typeof value.variant === "string" ? value.variant : void 0 };
       }
@@ -2201,7 +2223,7 @@ async function applyConfigChanges(client, _scope, _runtime, snapshot, changes, h
 
 // src/last-applied.ts
 import { randomUUID } from "node:crypto";
-import { mkdir as mkdir2, open as open2, readFile as readFile3, readdir as readdir2, rename, rm as rm2, rmdir as rmdir2, unlink, writeFile } from "node:fs/promises";
+import { mkdir as mkdir2, open as open2, readFile as readFile3, readdir as readdir2, rename, rm as rm3, rmdir as rmdir2, unlink, writeFile as writeFile2 } from "node:fs/promises";
 import { hostname } from "node:os";
 import path4 from "node:path";
 import { TextDecoder } from "node:util";
@@ -2240,7 +2262,7 @@ async function saveLastApplied(file, configFile, name) {
     temporaryOwned = false;
   } finally {
     try {
-      if (temporaryOwned) await rm2(temporary, { force: true });
+      if (temporaryOwned) await rm3(temporary, { force: true });
     } finally {
       await releaseLock(lock, owner);
     }
@@ -2251,7 +2273,7 @@ async function acquireLock(lock) {
   const prepared = `${lock}.${randomUUID()}.pending`;
   await mkdir2(prepared, { mode: PRIVATE_DIRECTORY_MODE2 });
   try {
-    await writeFile(path4.join(prepared, owner), JSON.stringify({ pid: process.pid, hostname: hostname() }), {
+    await writeFile2(path4.join(prepared, owner), JSON.stringify({ pid: process.pid, hostname: hostname() }), {
       flag: "wx",
       mode: PRIVATE_FILE_MODE
     });
@@ -2266,7 +2288,7 @@ async function acquireLock(lock) {
     }
     throw lockConflict(lock);
   } finally {
-    await rm2(prepared, { recursive: true, force: true });
+    await rm3(prepared, { recursive: true, force: true });
   }
 }
 async function recoverAbandonedLock(lock) {
@@ -2352,8 +2374,8 @@ function hasCode(error, code) {
 }
 
 // src/presets.ts
-import { randomBytes as randomBytes2 } from "node:crypto";
-import { mkdir as mkdir3, open as open3, readFile as readFile4, rename as rename2, rm as rm3 } from "node:fs/promises";
+import { randomBytes as randomBytes3 } from "node:crypto";
+import { mkdir as mkdir3, open as open3, readFile as readFile4, rename as rename2, rm as rm4 } from "node:fs/promises";
 import path5 from "node:path";
 import { TextDecoder as TextDecoder2 } from "node:util";
 var PRESETS_FILE = "model-configurator-presets.json";
@@ -2435,7 +2457,7 @@ async function writePresets(file, presets) {
 `;
   const directory = path5.dirname(file);
   await mkdir3(directory, { recursive: true, mode: 448 });
-  const suffix = `${timestamp2()}-${randomBytes2(3).toString("hex")}`;
+  const suffix = `${timestamp2()}-${randomBytes3(3).toString("hex")}`;
   const temporary = `${file}.${suffix}.tmp`;
   let temporaryOwned = false;
   try {
@@ -2451,7 +2473,7 @@ async function writePresets(file, presets) {
     temporaryOwned = false;
     await syncDirectory2(directory);
   } catch (error) {
-    if (temporaryOwned) await rm3(temporary, { force: true }).catch(() => void 0);
+    if (temporaryOwned) await rm4(temporary, { force: true }).catch(() => void 0);
     throw error;
   }
 }
@@ -3361,7 +3383,7 @@ var tui_default = Plugin.define({
         slash: { name: MODELS_PRESETS_SLASH_NAME },
         async run() {
           try {
-            const host = createConfiguratorHost(context);
+            const host = await createConfiguratorHost(context);
             const profilesRoot = await resolveProfilesRoot(import.meta.url, options.profilesDir, host.paths.directory);
             await runModelConfigurator(host, profilesRoot);
           } catch (error) {

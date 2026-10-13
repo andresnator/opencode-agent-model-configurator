@@ -6,4 +6,4 @@ export type ConfiguratorHost = {
     client: Pick<Context["client"], "agent" | "model" | "location">;
     ui: Pick<Context["ui"], "dialog" | "toast">;
 };
-export declare function createConfiguratorHost(context: Context): ConfiguratorHost;
+export declare function createConfiguratorHost(context: Context): Promise<ConfiguratorHost>;

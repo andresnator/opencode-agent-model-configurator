@@ -26,6 +26,7 @@ import {
   displayConfigFile,
   readConfigSnapshot,
   renderConfigChanges,
+  resolveConfigFile,
   writeConfigChanges,
   type ConfigSnapshot,
   type PersistenceStep,
@@ -3740,10 +3741,11 @@ async function shouldPreserveNativeV2ConfigAndRemoveOverriddenLegacyAssignments(
 }
 
 async function shouldResolveV2HostLocationAtCommandTime(): Promise<void> {
-  const host = createConfiguratorHost({
+  const client = localHostClient()
+  const host = await createConfiguratorHost({
     location: undefined,
     data: { location: { default: () => ({ directory: "/project/package" }) } },
-    client: {}, ui: {},
+    client, ui: {},
   } as unknown as Context)
   assert.equal(host.paths.directory, "/project/package")
   assert.equal(host.paths.worktree, "/project/package")
@@ -3752,20 +3754,183 @@ async function shouldResolveV2HostLocationAtCommandTime(): Promise<void> {
   const context = {
     get location() { return { directory } },
     data: { location: { default() { throw new Error("current location should take precedence") } } },
-    client: {}, ui: {},
+    client, ui: {},
   } as unknown as Context
-  assert.equal(createConfiguratorHost(context).paths.directory, directory)
+  assert.equal((await createConfiguratorHost(context)).paths.directory, directory)
   directory = "/current/second"
-  assert.equal(createConfiguratorHost(context).paths.directory, directory)
+  assert.equal((await createConfiguratorHost(context)).paths.directory, directory)
   const previousConfigDir = process.env.OPENCODE_CONFIG_DIR
   try {
     process.env.OPENCODE_CONFIG_DIR = "/custom/opencode"
-    assert.equal(createConfiguratorHost(context).paths.config, "/custom/opencode")
+    assert.equal((await createConfiguratorHost(context)).paths.config, "/custom/opencode")
   } finally {
     if (previousConfigDir === undefined) delete process.env.OPENCODE_CONFIG_DIR
     else process.env.OPENCODE_CONFIG_DIR = previousConfigDir
   }
   pass("shouldResolveV2HostLocationAtCommandTime")
+}
+
+function localHostClient(projectRoot?: string) {
+  return {
+    location: { async get({ location }: { location: { directory: string } }) {
+      return { ...location, project: { directory: projectRoot ?? location.directory } }
+    } },
+    file: { async list({ location, path: directory }: { location: { directory: string }; path: string }) {
+      return { location, data: (await readdir(directory)).map((name) => ({
+        type: "file", path: path.relative(location.directory, path.join(directory, name)),
+      })) }
+    } },
+  }
+}
+
+async function shouldRejectRemoteCommandsBeforeOpeningWizardOrChangingLocalFiles(): Promise<void> {
+  const scratch = await createWizardFixture()
+  try {
+    // Given local project/global configuration, presets, and history alongside
+    // a remote server whose project directory can even match the local path.
+    const files = [
+      path.join(scratch.project, ".opencode", "opencode.jsonc"),
+      path.join(scratch.global, "opencode.json"),
+      path.join(scratch.global, "model-configurator-presets.json"),
+      path.join(scratch.global, "model-configurator-last-applied.json"),
+    ]
+    for (const file of files.slice(1)) await writeJson(file, { sentinel: true })
+    const originals = await Promise.all(files.map((file) => readFile(file)))
+    for (const response of ["missing", "mismatch"]) {
+      const toasts: TuiToast[] = []
+      let run: () => Promise<void> = () => { throw new Error("command not registered") }
+      let probeDirectory = ""
+      let otherCalls = 0
+      const unexpected = async () => { otherCalls++; throw new Error("wizard must not reach remote operations") }
+      const context = {
+        options: {}, location: { directory: scratch.project },
+        client: {
+          file: { async list({ path: directory }: { path: string }) {
+            probeDirectory = directory
+            if (response === "missing") throw new Error("remote directory not found")
+            return { location: { directory: scratch.project }, data: [{ path: "unrelated", type: "file" }] }
+          } },
+          location: { get: unexpected, reload: unexpected },
+          agent: { list: unexpected }, model: { list: unexpected },
+        },
+        keymap: { layer(factory: () => { commands: Array<{ run: () => Promise<void> }> }) { run = factory().commands[0].run } },
+        ui: { toast: { show(toast: TuiToast) { toasts.push(toast) } }, dialog: { set: unexpected, select: unexpected } },
+      } as unknown as Context
+      await modelsPresetsPlugin.setup(context)
+
+      // When the actual registered slash/palette command is invoked.
+      await run()
+
+      // Then it rejects before offering either scope or loading local data,
+      // does not reload the server, and cleans its sole temporary probe.
+      assert.equal(otherCalls, 0)
+      assert.match(toasts.at(-1)?.message ?? "", /Remote configuration is not supported/)
+      assert.deepEqual(await Promise.all(files.map((file) => readFile(file))), originals)
+      await assert.rejects(stat(probeDirectory), { code: "ENOENT" })
+    }
+    pass("shouldRejectRemoteCommandsBeforeOpeningWizardOrChangingLocalFiles")
+  } finally { await rm(scratch.root, { recursive: true, force: true }) }
+}
+
+async function shouldUseCheckoutRootWhenOpeningFromSubdirectories(): Promise<void> {
+  const scratch = await createWizardFixture()
+  try {
+    // Given an existing configuration at the checkout root and two nested locations.
+    const file = path.join(scratch.project, ".opencode", "opencode.jsonc")
+    for (const folder of ["packages/one", "packages/two"]) {
+      const directory = path.join(scratch.project, folder)
+      await mkdir(directory, { recursive: true })
+      const host = await createConfiguratorHost({
+        location: { directory }, client: localHostClient(scratch.project), ui: {},
+      } as unknown as Context)
+
+      // When resolving and updating the project configuration.
+      assert.equal(host.paths.directory, directory)
+      assert.equal(host.paths.worktree, scratch.project)
+      assert.equal(await resolveConfigFile("project", host.paths), file)
+      const snapshot = await readConfigSnapshot(file)
+      await writeConfigChanges(snapshot, [{ agent: "alpha", before: snapshot.mappings.alpha, after: { model: "openai/new" }, action: "set" }])
+
+      // Then both locations see the same root file; no nested configuration is created.
+      assert.equal((await readConfigSnapshot(file)).mappings.alpha.model, "openai/new")
+      await assert.rejects(stat(path.join(directory, ".opencode")), { code: "ENOENT" })
+    }
+    pass("shouldUseCheckoutRootWhenOpeningFromSubdirectories")
+  } finally { await rm(scratch.root, { recursive: true, force: true }) }
+}
+
+async function shouldSeparateVariantsInCompactV2ReferencesWithoutSplittingModelSlashes(): Promise<void> {
+  const scratch = await mkdtemp(path.join(tmpdir(), "models-v2-compact."))
+  try {
+    // Given compact and object native references alongside a legacy mapping.
+    const file = path.join(scratch, "opencode.json")
+    await writeJson(file, {
+      agents: {
+        compact: { model: "anthropic/claude#high" },
+        slash: { model: "p/org/model/with/slashes#medium" },
+        plain: { model: "p/org/model" },
+        object: { model: { providerID: "p", model: "org/model", variant: "low" } },
+      },
+      agent: { legacy: { model: "p/legacy", variant: "high" } },
+    })
+
+    // When the configuration snapshot is read.
+    const snapshot = await readConfigSnapshot(file)
+
+    // Then variants are separate and model identifiers remain complete.
+    assert.deepEqual(snapshot.mappings, {
+      compact: { model: "anthropic/claude", variant: "high" },
+      slash: { model: "p/org/model/with/slashes", variant: "medium" },
+      plain: { model: "p/org/model", variant: undefined },
+      object: { model: "p/org/model", variant: "low" },
+      legacy: { model: "p/legacy", variant: "high" },
+    })
+    pass("shouldSeparateVariantsInCompactV2ReferencesWithoutSplittingModelSlashes")
+  } finally { await rm(scratch, { recursive: true, force: true }) }
+}
+
+async function shouldRetainCompactAssignmentsInSavedPresetsWhenAnotherAgentChanges(): Promise<void> {
+  const scratch = await createWizardFixture()
+  try {
+    // Given alpha uses a compact native reference and only beta is being changed.
+    const file = path.join(scratch.project, ".opencode", "opencode.jsonc")
+    await writeJson(file, { agents: { alpha: { model: "openai/model/with/slash#high", system: "keep" }, beta: { model: "anthropic/old" } } })
+    const toasts: TuiToast[] = []
+    const api = createFakeApi(scratch, toasts, {
+      select(title, options) {
+        if (title === "Configuration scope") return option(options, "project")
+        if (title === "Agents") return option(options, "default")
+        if (title === "Tier: high") return option(options, "__keep_current__")
+        if (title === "Tier: low") return option(options, "openai/new")
+        if (title === "Variant for openai/new") return option(options, "__no_variant__")
+        if (title === "Individual overrides") return option(options, "__override_no__")
+        if (title.startsWith("Apply ")) return option(options, "__create_preset__")
+        throw new Error(`unexpected select dialog: ${title}`)
+      },
+      confirm: () => true,
+    })
+    api.client.model.list = async () => ({ location: { directory: scratch.project }, data: [
+      { providerID: "openai", id: "new", enabled: true, variants: [] },
+      { providerID: "openai", id: "model/with/slash", enabled: true, variants: [{ id: "high" }] },
+    ] }) as Awaited<ReturnType<typeof api.client.model.list>>
+
+    // When the wizard saves the preset and applies the beta change.
+    await runModelConfigurator(api, scratch.profiles)
+
+    // Then the unchanged compact assignment is saved intact and remains valid on reuse.
+    assert.equal(toasts.at(-1)?.variant, "success")
+    const [preset] = await loadPresets(path.join(scratch.global, "model-configurator-presets.json"))
+    assert.deepEqual(preset.assignments, {
+      alpha: { model: "openai/model/with/slash", variant: "high" }, beta: { model: "openai/new" },
+    })
+    const partition = partitionPresetAssignments(preset.assignments, scratch.agents.map((agent) => agent.name), [
+      { id: "openai/model/with/slash", variants: ["high"] },
+      { id: "openai/new", variants: [] },
+    ])
+    assert.deepEqual(partition.stale, [])
+    assert.deepEqual(JSON.parse(await readFile(file, "utf8")).agents.alpha, { model: "openai/model/with/slash#high", system: "keep" })
+    pass("shouldRetainCompactAssignmentsInSavedPresetsWhenAnotherAgentChanges")
+  } finally { await rm(scratch.root, { recursive: true, force: true }) }
 }
 
 async function shouldShortenConfigFilePathsForDisplay(): Promise<void> {
@@ -4120,5 +4285,9 @@ await shouldReloadBothScopesAfterDurableWriteAndRetainFilesOnReloadFailure()
 await shouldPreserveV2AgentIdsPermissionsAndEnabledModelVariants()
 await shouldPreserveNativeV2ConfigAndRemoveOverriddenLegacyAssignments()
 await shouldResolveV2HostLocationAtCommandTime()
+await shouldRejectRemoteCommandsBeforeOpeningWizardOrChangingLocalFiles()
+await shouldUseCheckoutRootWhenOpeningFromSubdirectories()
+await shouldSeparateVariantsInCompactV2ReferencesWithoutSplittingModelSlashes()
+await shouldRetainCompactAssignmentsInSavedPresetsWhenAnotherAgentChanges()
 await shouldShortenConfigFilePathsForDisplay()
 process.stdout.write(`PASS: ${passes} TypeScript Models Presets contracts.\n`)

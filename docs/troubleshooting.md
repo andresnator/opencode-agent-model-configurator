@@ -5,6 +5,7 @@ Find the symptom you can see and follow its first action.
 | Symptom | First action |
 | --- | --- |
 | Plugin or command is missing | Check the npm entry in `cli.json`, then restart OpenCode |
+| Remote configuration is not supported | Open OpenCode on the server machine |
 | Agent, provider, model, or variant is missing | Refresh the live OpenCode catalog |
 | Profile or preset is missing | Read the warning before editing stored data |
 | Configuration changed or cannot be written | Keep the current file, fix the cause, and reopen the plugin |
@@ -33,6 +34,10 @@ Do not edit unrelated entries or use `npm install -g`.
 ## OpenCode says paths are still syncing
 
 Wait for project path syncing to finish, then open Models Presets again.
+
+## Remote configuration is not supported
+
+The configurator writes files in the CLI's filesystem. It stops before opening the wizard if the connected server cannot see a temporary local probe. No configuration, preset, or history is changed. Open OpenCode on the server machine to configure its files. If both processes are local, check their temporary-directory access and the server's file-list API, then retry.
 
 ## An agent, provider, model, or variant is missing
 

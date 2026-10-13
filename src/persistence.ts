@@ -936,6 +936,11 @@ function extractMappings(config: Record<string, unknown>): Record<string, AgentM
         const model = typeof value.model.providerID === "string" && typeof value.model.model === "string"
           ? `${value.model.providerID}/${value.model.model}` : undefined
         mappings[agent] = { model, variant: typeof value.model.variant === "string" ? value.model.variant : undefined }
+      } else if (container === "agents" && typeof value.model === "string") {
+        const separator = value.model.indexOf("#")
+        mappings[agent] = separator < 0
+          ? { model: value.model, variant: undefined }
+          : { model: value.model.slice(0, separator), variant: value.model.slice(separator + 1) }
       } else {
         mappings[agent] = { model: typeof value.model === "string" ? value.model : undefined, variant: container === "agent" && typeof value.variant === "string" ? value.variant : undefined }
       }
