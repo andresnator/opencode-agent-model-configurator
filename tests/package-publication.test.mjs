@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises"
 const ROOT = new URL("../", import.meta.url)
 const PACKAGE_NAME = "opencode-models-presets"
 const NPM_REGISTRY = "https://registry.npmjs.org/"
-const OPENCODE_RANGE = ">=1.17.15 <2"
+const OPENCODE_RANGE = ">=2.0.28 <3"
 const NPM_LIFECYCLE_SCRIPTS = [
   "dependencies",
   "install",
@@ -30,6 +30,7 @@ const EXPECTED_PACKAGE_FILES = [
   "README.md",
   "dist/domain.d.ts",
   "dist/hot-apply.d.ts",
+  "dist/host.d.ts",
   "dist/last-applied.d.ts",
   "dist/options.d.ts",
   "dist/persistence.d.ts",
@@ -72,17 +73,13 @@ function shouldExposeOnlyTheTuiPluginWhenPackageIsPublished() {
       registry: NPM_REGISTRY,
     },
     exports: {
-      ".": {
-        types: "./dist/tui.d.ts",
-        import: "./dist/tui.js",
-      },
       "./tui": {
         types: "./dist/tui.d.ts",
         import: "./dist/tui.js",
       },
     },
     opencodeEngine: OPENCODE_RANGE,
-    dependencies: undefined,
+    dependencies: { "@opencode/plugin": "2.0.28" },
     optionalDependencies: undefined,
     peerDependencies: undefined,
     bundledDependencies: undefined,

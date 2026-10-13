@@ -1,2 +1,2 @@
-import type { TuiPluginApi } from "@opencode-ai/plugin/tui";
-export declare function runModelConfigurator(api: TuiPluginApi, profilesRoot: string): Promise<void>;
+import type { ConfiguratorHost } from "./host";
+export declare function runModelConfigurator(api: ConfiguratorHost, profilesRoot: string): Promise<void>;

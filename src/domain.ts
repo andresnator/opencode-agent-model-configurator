@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url"
 
 export const DEFAULT_PROFILE_NAME = "default"
 
-const AGENT_LIST_ERROR = "This OpenCode server did not return an agent list (GET /agent). Update OpenCode and retry."
+const AGENT_LIST_ERROR = "This OpenCode server did not return an agent list (GET /api/agent). Update OpenCode and retry."
 
 export type AgentMode = "primary" | "subagent" | "all"
 
@@ -115,7 +115,7 @@ export async function resolveProfilesRoot(
 }
 
 /**
- * Normalizes the response of the OpenCode `GET /agent` endpoint, which already merges built-in,
+ * Normalizes the response of the OpenCode V2 `GET /api/agent` endpoint, which already merges built-in,
  * repo and user agents. Entries without a usable name are skipped rather than aborting the wizard;
  * only an unusable envelope (an older server that cannot answer at all) throws.
  */
@@ -127,11 +127,11 @@ export function normalizeLiveAgents(result: unknown): LiveAgent[] {
   for (const entry of root) {
     if (!isRecord(entry) || typeof entry.name !== "string" || entry.name.length === 0) continue
     const agent: LiveAgent = {
-      name: entry.name,
+      name: typeof entry.id === "string" && entry.id.length > 0 ? entry.id : entry.name,
       mode: entry.mode === "primary" || entry.mode === "all" ? entry.mode : "subagent",
       native: entry.native === true,
       hidden: entry.hidden === true,
-      taskRules: normalizeTaskRules(entry.permission),
+      taskRules: normalizeTaskRules(entry.permissions ?? entry.permission),
     }
     if (typeof entry.description === "string" && entry.description.length > 0) agent.description = entry.description
     byName.set(agent.name, agent)
@@ -284,21 +284,22 @@ export function validateProfile(raw: unknown, agents: readonly string[]): Profil
   }
 }
 
-export function normalizeProviderCatalog(result: unknown): ProviderOption[] {
+/** V2 model.list returns the enabled catalog independently of provider.list. */
+export function normalizeModelCatalog(result: unknown): ProviderOption[] {
   const root = isRecord(result) && "data" in result ? result.data : result
-  if (!isRecord(root)) return []
-
-  const connected = new Set(
-    Array.isArray(root.connected) ? root.connected.filter((provider): provider is string => typeof provider === "string") : [],
-  )
-  const providers = Array.isArray(root.all) ? root.all : []
-
-  return providers
-    .filter(isRecord)
-    .filter((provider) => typeof provider.id === "string" && connected.has(provider.id))
-    .map((provider) => ({ id: provider.id as string, models: normalizeModels(provider.models) }))
-    .filter((provider) => provider.models.length > 0)
-    .sort((left, right) => left.id.localeCompare(right.id))
+  if (!Array.isArray(root)) throw new Error("This OpenCode server did not return a model catalog (GET /api/model).")
+  const providers = new Map<string, ModelOption[]>()
+  for (const model of root) {
+    if (!isRecord(model) || model.enabled !== true || typeof model.id !== "string" || typeof model.providerID !== "string") continue
+    const variants = Array.isArray(model.variants)
+      ? model.variants.filter(isRecord).map((variant) => variant.id).filter((id): id is string => typeof id === "string").sort()
+      : []
+    const models = providers.get(model.providerID) ?? []
+    models.push({ id: model.id, variants })
+    providers.set(model.providerID, models)
+  }
+  return [...providers].sort(([left], [right]) => left.localeCompare(right))
+    .map(([id, models]) => ({ id, models: models.sort((left, right) => left.id.localeCompare(right.id)) }))
 }
 
 export function flattenModels(providers: readonly ProviderOption[]): ModelOption[] {
@@ -336,10 +337,14 @@ function normalizeTaskRules(raw: unknown): TaskRule[] {
   if (!Array.isArray(raw)) return []
   const rules: TaskRule[] = []
   for (const rule of raw) {
-    if (!isRecord(rule) || typeof rule.permission !== "string" || typeof rule.pattern !== "string") continue
-    if (!wildcardMatch("task", rule.permission)) continue
-    if (rule.action !== "allow" && rule.action !== "deny" && rule.action !== "ask") continue
-    rules.push({ pattern: rule.pattern, action: rule.action })
+    if (!isRecord(rule)) continue
+    const native = typeof rule.resource === "string" && typeof rule.effect === "string"
+    const action = native ? rule.action : rule.permission
+    const resource = native ? rule.resource : rule.pattern
+    const effect = native ? rule.effect : rule.action
+    if (typeof action !== "string" || typeof resource !== "string" || !wildcardMatch(native ? "subagent" : "task", action)) continue
+    if (effect !== "allow" && effect !== "deny" && effect !== "ask") continue
+    rules.push({ pattern: resource, action: effect })
   }
   return rules
 }
@@ -358,25 +363,6 @@ function byAgentName(left: LiveAgent, right: LiveAgent): number {
 function isMissingPath(error: unknown): boolean {
   const code = isRecord(error) ? error.code : undefined
   return code === "ENOENT" || code === "ENOTDIR"
-}
-
-function normalizeModels(raw: unknown): ModelOption[] {
-  const entries = Array.isArray(raw)
-    ? raw.filter(isRecord).map((model) => [model.id, model] as const)
-    : isRecord(raw)
-      ? Object.entries(raw)
-      : []
-
-  return entries
-    .filter((entry): entry is readonly [string, Record<string, unknown>] => typeof entry[0] === "string" && isRecord(entry[1]))
-    .map(([id, model]) => ({ id, variants: normalizeVariants(model.variants) }))
-    .sort((left, right) => left.id.localeCompare(right.id))
-}
-
-function normalizeVariants(raw: unknown): string[] {
-  if (Array.isArray(raw)) return raw.filter((variant): variant is string => typeof variant === "string").sort()
-  if (isRecord(raw)) return Object.keys(raw).sort()
-  return []
 }
 
 function normalizeMapping(mapping: AgentMapping | undefined): AgentMapping {

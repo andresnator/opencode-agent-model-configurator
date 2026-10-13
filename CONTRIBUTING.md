@@ -1,6 +1,6 @@
 # Contributing
 
-Use Node.js `22.23.2` and pnpm `10.34.5`.
+Use Node.js `26.4.0` and pnpm `10.34.5`.
 
 ## Quick path
 
@@ -16,9 +16,15 @@ Make one focused change, update its tests and documentation, then run both check
 
 Register the current repository instead of the npm package:
 
-```bash
-opencode plugin "$PWD" --global --force
+Add an absolute path to this repository in the global `cli.json`:
+
+```json
+{
+  "plugins": [{"package": "/absolute/path/to/opencode-agent-model-configurator"}]
+}
 ```
+
+The root `tui.ts` entrypoint loads the compiled distribution for local V2 discovery. Run `pnpm run build` before loading the package. Preserve all other plugin entries and options when replacing the npm registration.
 
 Keep the repository at that path, restart OpenCode, and test **Configure model presets** or `/models-profiles`.
 

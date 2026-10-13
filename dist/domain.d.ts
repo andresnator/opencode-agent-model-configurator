@@ -79,7 +79,7 @@ export type ProfileLoad = {
 };
 export declare function resolveProfilesRoot(moduleUrl: string, configuredProfilesDir?: string, baseDirectory?: string): Promise<string>;
 /**
- * Normalizes the response of the OpenCode `GET /agent` endpoint, which already merges built-in,
+ * Normalizes the response of the OpenCode V2 `GET /api/agent` endpoint, which already merges built-in,
  * repo and user agents. Entries without a usable name are skipped rather than aborting the wizard;
  * only an unusable envelope (an older server that cannot answer at all) throws.
  */
@@ -97,7 +97,8 @@ export declare function buildAgentHierarchy(agents: readonly LiveAgent[]): Agent
 export declare function wildcardMatch(value: string, pattern: string): boolean;
 export declare function loadProfiles(profilesRoot: string, agents: readonly string[]): Promise<ProfileLoad>;
 export declare function validateProfile(raw: unknown, agents: readonly string[]): ProfileValidation;
-export declare function normalizeProviderCatalog(result: unknown): ProviderOption[];
+/** V2 model.list returns the enabled catalog independently of provider.list. */
+export declare function normalizeModelCatalog(result: unknown): ProviderOption[];
 export declare function flattenModels(providers: readonly ProviderOption[]): ModelOption[];
 export declare function calculateChanges(current: Readonly<Record<string, AgentMapping>>, decisions: ReadonlyMap<string, AgentDecision>): AgentChange[];
 export declare function formatMapping(mapping: AgentMapping): string;

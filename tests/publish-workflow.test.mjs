@@ -41,7 +41,7 @@ function shouldUseExactToolchainAndReleaseTagWhenPackageIsPrepared() {
     checkoutPersistsCredentials: !workflow.includes("persist-credentials: false"),
     releaseTagEnvironment: workflow.includes("RELEASE_TAG: ${{ github.event.release.tag_name }}"),
     tagVerifier: workflow.includes("run: node scripts/verify-release-tag.mjs"),
-    nodeVersion: workflow.includes("node-version: 22.23.2"),
+    nodeVersion: workflow.includes("node-version: 26.4.0"),
     pnpmVersion: workflow.includes("version: 10.34.5"),
     npmVersion: workflow.includes("npm install --global npm@12.0.2"),
   }

@@ -1,4 +1,5 @@
-import type { TuiDialogSelectOption, TuiPluginApi } from "@opencode-ai/plugin/tui"
+import type { DialogSelectOption } from "@opencode/plugin/tui/context"
+import type { ConfiguratorHost } from "./host"
 import {
   buildAgentHierarchy,
   calculateChanges,
@@ -6,7 +7,7 @@ import {
   formatMapping,
   loadProfiles,
   normalizeLiveAgents,
-  normalizeProviderCatalog,
+  normalizeModelCatalog,
   visibleAgents,
   type AgentDecision,
   type AgentMapping,
@@ -97,38 +98,37 @@ type WizardStep = {
   run: (state: WizardState) => Promise<StepOutcome>
 }
 
-export async function runModelConfigurator(api: TuiPluginApi, profilesRoot: string): Promise<void> {
+export async function runModelConfigurator(api: ConfiguratorHost, profilesRoot: string): Promise<void> {
   if (configuratorRunning) {
-    api.ui.toast({ variant: "warning", message: "Model presets are already open." })
+    api.ui.toast.show({ variant: "warning", message: "Model presets are already open." })
     return
   }
   configuratorRunning = true
-  const previousDialogSize = api.ui.dialog.size
   try {
-    if (!api.state.ready || !api.state.path.directory) {
-      api.ui.toast({ variant: "warning", message: "OpenCode paths are still syncing. Try again in a moment." })
+    if (!api.paths.directory) {
+      api.ui.toast.show({ variant: "warning", message: "OpenCode paths are still syncing. Try again in a moment." })
       return
     }
-    api.ui.dialog.setSize("large")
+    api.ui.dialog.set({ size: "large" })
 
     const agents = await loadAgents(api)
     if (agents.length === 0) {
-      api.ui.toast({ variant: "warning", message: "This OpenCode server reported no agents to configure." })
+      api.ui.toast.show({ variant: "warning", message: "This OpenCode server reported no agents to configure." })
       return
     }
 
     const { profiles, invalid } = await loadProfiles(profilesRoot, agents.map((agent) => agent.name))
     for (const entry of invalid) {
-      api.ui.toast({ variant: "warning", message: `Skipped profile ${entry.path}: ${entry.errors.join("; ")}` })
+      api.ui.toast.show({ variant: "warning", message: `Skipped profile ${entry.path}: ${entry.errors.join("; ")}` })
     }
-    const presetsPath = presetsFile(api.state.path)
+    const presetsPath = presetsFile(api.paths)
     let presets: StoredPreset[] = []
     let presetStorageAvailable = true
     try {
       presets = await loadPresets(presetsPath)
     } catch (error) {
       presetStorageAvailable = false
-      api.ui.toast({
+      api.ui.toast.show({
         variant: "warning",
         message: `Preset storage unavailable at ${presetsPath}: ${errorMessage(error)} Repair the file and reopen model presets.`,
       })
@@ -136,7 +136,7 @@ export async function runModelConfigurator(api: TuiPluginApi, profilesRoot: stri
 
     const catalog = await loadCatalog(api)
     if (catalog.length === 0) {
-      api.ui.toast({ variant: "warning", message: "No connected providers with models are available. Connect one and retry." })
+      api.ui.toast.show({ variant: "warning", message: "No connected providers with models are available. Connect one and retry." })
       return
     }
     const models = flattenModels(catalog)
@@ -152,15 +152,14 @@ export async function runModelConfigurator(api: TuiPluginApi, profilesRoot: stri
     }
     await runSteps(api, state)
   } catch (error) {
-    api.ui.toast({ variant: "error", title: "Model presets failed", message: errorMessage(error), duration: 8000 })
+    api.ui.toast.show({ variant: "error", title: "Model presets failed", message: errorMessage(error), duration: 8000 })
   } finally {
     api.ui.dialog.clear()
-    api.ui.dialog.setSize(previousDialogSize)
     configuratorRunning = false
   }
 }
 
-async function runSteps(api: TuiPluginApi, state: WizardState): Promise<void> {
+async function runSteps(api: ConfiguratorHost, state: WizardState): Promise<void> {
   const steps: WizardStep[] = [
     { run: (s) => runScopeStep(api, s) },
     { run: (s) => runHubStep(api, s) },
@@ -185,10 +184,10 @@ async function runSteps(api: TuiPluginApi, state: WizardState): Promise<void> {
   // index < 0 → esc past the first step → exit silently
 }
 
-async function runScopeStep(api: TuiPluginApi, state: WizardState): Promise<StepOutcome> {
+async function runScopeStep(api: ConfiguratorHost, state: WizardState): Promise<StepOutcome> {
   const [projectFile, globalFile] = await Promise.all([
-    resolveConfigFile("project", api.state.path),
-    resolveConfigFile("global", api.state.path),
+    resolveConfigFile("project", api.paths),
+    resolveConfigFile("global", api.paths),
   ])
   const warning = higherPrecedenceWarning()
   const suffix = warning ? ` — ${warning}` : ""
@@ -196,8 +195,8 @@ async function runScopeStep(api: TuiPluginApi, state: WizardState): Promise<Step
     api,
     "Configuration scope",
     [
-      { title: "Project", value: "project", description: `${displayConfigFile("project", projectFile, api.state.path)}${suffix}` },
-      { title: "Global", value: "global", description: `${displayConfigFile("global", globalFile, api.state.path)}${suffix}` },
+      { title: "Project", value: "project", description: `${displayConfigFile("project", projectFile, api.paths)}${suffix}` },
+      { title: "Global", value: "global", description: `${displayConfigFile("global", globalFile, api.paths)}${suffix}` },
     ],
     CLOSE_HINT,
     state.scope,
@@ -208,17 +207,17 @@ async function runScopeStep(api: TuiPluginApi, state: WizardState): Promise<Step
   state.snapshot = await readConfigSnapshot(state.configFile)
   state.lastAppliedPreset = undefined
   try {
-    state.lastAppliedPreset = await loadLastApplied(lastAppliedFile(api.state.path), state.configFile)
+    state.lastAppliedPreset = await loadLastApplied(lastAppliedFile(api.paths), state.configFile)
   } catch (error) {
-    api.ui.toast({ variant: "warning", message: `Last applied preset history unavailable: ${errorMessage(error)}` })
+    api.ui.toast.show({ variant: "warning", message: `Last applied preset history unavailable: ${errorMessage(error)}` })
   }
   return "next"
 }
 
-async function runHubStep(api: TuiPluginApi, state: WizardState): Promise<StepOutcome> {
+async function runHubStep(api: ConfiguratorHost, state: WizardState): Promise<StepOutcome> {
   while (true) {
     const pending = state.decisions?.size ?? 0
-    const options: TuiDialogSelectOption<string>[] = []
+    const options: DialogSelectOption<string>[] = []
     if (pending > 0) {
       options.push({
         title: `Review ${pending} pending change${pending === 1 ? "" : "s"}`,
@@ -292,7 +291,7 @@ async function runHubStep(api: TuiPluginApi, state: WizardState): Promise<StepOu
 
     const profileFile = state.profiles.find((file) => file.profile.name === selected)
     if (!profileFile) continue
-    for (const warning of profileFile.warnings) api.ui.toast({ variant: "warning", message: warning })
+    for (const warning of profileFile.warnings) api.ui.toast.show({ variant: "warning", message: warning })
     state.source = { kind: "profile" }
     state.selectedProfile = profileFile
     return "next"
@@ -325,7 +324,7 @@ function sectionDescription(children: number, openDelegation: boolean): string {
   return openDelegation ? `${base} + any other subagent` : base
 }
 
-async function runGroupAgentsLoop(api: TuiPluginApi, state: WizardState, section: AgentSection): Promise<void> {
+async function runGroupAgentsLoop(api: ConfiguratorHost, state: WizardState, section: AgentSection): Promise<void> {
   const agents = section.agents
   const decisions = (state.decisions ??= new Map())
   const current = state.snapshot!.mappings
@@ -387,7 +386,7 @@ function agentDecisionsEqual(left: AgentDecision | undefined, right: AgentDecisi
   return left.model === right.model && left.variant === right.variant
 }
 
-async function handlePresetChoice(api: TuiPluginApi, state: WizardState, preset: StoredPreset): Promise<StepOutcome | "reshow"> {
+async function handlePresetChoice(api: ConfiguratorHost, state: WizardState, preset: StoredPreset): Promise<StepOutcome | "reshow"> {
   const count = Object.keys(preset.assignments).length
   const action = await select(
     api,
@@ -406,17 +405,17 @@ async function handlePresetChoice(api: TuiPluginApi, state: WizardState, preset:
     } catch (error) {
       state.presets = []
       state.presetStorageAvailable = false
-      api.ui.toast({ variant: "error", title: "Preset not deleted", message: errorMessage(error), duration: 8000 })
+      api.ui.toast.show({ variant: "error", title: "Preset not deleted", message: errorMessage(error), duration: 8000 })
       return "reshow"
     }
     state.presets = state.presets.filter((entry) => entry.name !== preset.name)
-    api.ui.toast({ variant: "success", message: `Deleted preset "${preset.name}".` })
+    api.ui.toast.show({ variant: "success", message: `Deleted preset "${preset.name}".` })
     return "reshow"
   }
 
   const { valid, stale } = partitionPresetAssignments(preset.assignments, state.agents.map((agent) => agent.name), state.models)
   if (Object.keys(valid).length === 0) {
-    api.ui.toast({ variant: "warning", message: `Preset "${preset.name}" has no entries that match the live catalog.` })
+    api.ui.toast.show({ variant: "warning", message: `Preset "${preset.name}" has no entries that match the live catalog.` })
     return "reshow"
   }
   if (stale.length > 0) {
@@ -438,7 +437,7 @@ async function handlePresetChoice(api: TuiPluginApi, state: WizardState, preset:
   return "next"
 }
 
-async function runTiersStep(api: TuiPluginApi, state: WizardState): Promise<StepOutcome> {
+async function runTiersStep(api: ConfiguratorHost, state: WizardState): Promise<StepOutcome> {
   const profile = state.selectedProfile!.profile
   const current = state.snapshot!.mappings
   const tiers = Object.entries(profile.tiers).filter(([, tier]) => tier.agents.length > 0)
@@ -465,7 +464,7 @@ async function runTiersStep(api: TuiPluginApi, state: WizardState): Promise<Step
   return "next"
 }
 
-async function runOverridesStep(api: TuiPluginApi, state: WizardState): Promise<StepOutcome> {
+async function runOverridesStep(api: ConfiguratorHost, state: WizardState): Promise<StepOutcome> {
   // A Yes/No select (not a confirm) so esc is unambiguously "back one step" via the dialog stack's onClose.
   while (true) {
     const wants = await select(
@@ -484,7 +483,7 @@ async function runOverridesStep(api: TuiPluginApi, state: WizardState): Promise<
   }
 }
 
-async function runAgentOverrideLoop(api: TuiPluginApi, state: WizardState): Promise<boolean> {
+async function runAgentOverrideLoop(api: ConfiguratorHost, state: WizardState): Promise<boolean> {
   const agents = visibleAgents(state.agents, state.showHidden).map((agent) => agent.name)
   const decisions = state.decisions!
   const tierDecisions = state.tierDecisions!
@@ -554,13 +553,13 @@ async function runAgentOverrideLoop(api: TuiPluginApi, state: WizardState): Prom
   }
 }
 
-async function runReviewStep(api: TuiPluginApi, state: WizardState): Promise<StepOutcome> {
+async function runReviewStep(api: ConfiguratorHost, state: WizardState): Promise<StepOutcome> {
   const snapshot = state.snapshot!
   const decisions = state.decisions!
   const changes = calculateChanges(snapshot.mappings, decisions)
   const sourcePresetName = state.source?.kind === "preset" ? state.source.name : undefined
   if (changes.length === 0 && !sourcePresetName) {
-    api.ui.toast({ variant: "info", message: "No model assignment changes selected." })
+    api.ui.toast.show({ variant: "info", message: "No model assignment changes selected." })
     return "back"
   }
 
@@ -576,7 +575,7 @@ async function runReviewStep(api: TuiPluginApi, state: WizardState): Promise<Ste
   const title = sourcePresetName
     ? `Apply ${changes.length} model change${changes.length === 1 ? "" : "s"} from preset "${sourcePresetName}"?`
     : `Apply ${changes.length} model change${changes.length === 1 ? "" : "s"} with a preset?`
-  const actions: TuiDialogSelectOption<string>[] = sourcePresetName
+  const actions: DialogSelectOption<string>[] = sourcePresetName
     ? [
         {
           title: `Apply preset "${sourcePresetName}"`,
@@ -600,22 +599,24 @@ async function runReviewStep(api: TuiPluginApi, state: WizardState): Promise<Ste
           disabled: !namedStorageAvailable || state.presets.length === 0,
         },
       ]
-  const choice = await select(
-    api,
-    title,
-    [
-      ...actions,
-      { title: "Cancel", value: CANCEL },
-      ...rows.map((change) => ({
-        title: change.agent,
-        value: `__change__:${change.agent}`,
-        description: `${formatMapping(change.before)} -> ${formatMapping(change.after)}`,
-        category: categoryOf.get(change.agent) ?? "other",
-        disabled: true,
-      })),
-    ],
-    BACK_HINT,
-  )
+  let choice: string | undefined
+  do {
+    choice = await select(
+      api,
+      title,
+      [
+        ...actions,
+        { title: "Cancel", value: CANCEL },
+        ...rows.map((change) => ({
+          title: change.agent,
+          value: `__change__:${change.agent}`,
+          description: `${formatMapping(change.before)} -> ${formatMapping(change.after)}`,
+          category: categoryOf.get(change.agent) ?? "other",
+        })),
+      ],
+      BACK_HINT,
+    )
+  } while (choice?.startsWith("__change__:"))
   if (!choice) return "back"
   if (choice === CANCEL) return "done"
   if (sourcePresetName && choice !== APPLY_NAMED_PRESET) return "back"
@@ -643,7 +644,7 @@ async function runReviewStep(api: TuiPluginApi, state: WizardState): Promise<Ste
   const refreshedModels = flattenModels(await loadCatalog(api))
   const stale = findStaleSelections(decisions, refreshedModels)
   if (stale.length > 0) {
-    api.ui.toast({ variant: "warning", message: `Selections changed in the live catalog: ${stale.join(", ")}. Reopen and select again.` })
+    api.ui.toast.show({ variant: "warning", message: `Selections changed in the live catalog: ${stale.join(", ")}. Reopen and select again.` })
     return "exit"
   }
 
@@ -657,12 +658,12 @@ async function runReviewStep(api: TuiPluginApi, state: WizardState): Promise<Ste
       )
     } catch (error) {
       if (isPresetConflictError(error)) {
-        api.ui.toast({ variant: "warning", message: errorMessage(error) })
+        api.ui.toast.show({ variant: "warning", message: errorMessage(error) })
         return "done"
       }
       state.presets = []
       state.presetStorageAvailable = false
-      api.ui.toast({
+      api.ui.toast.show({
         variant: "error",
         title: "Preset not saved",
         message: `${errorMessage(error)} Configuration was not applied.`,
@@ -677,14 +678,14 @@ async function runReviewStep(api: TuiPluginApi, state: WizardState): Promise<Ste
     result = await applyConfigChanges(
       api.client,
       state.scope!,
-      api.state.path,
+      api.paths,
       snapshot,
       changes,
       {},
       { forceWrite: sourcePresetName !== undefined },
     )
   } catch (error) {
-    api.ui.toast({
+    api.ui.toast.show({
       variant: "error",
       title: "Configuration not applied",
       message: presetMutated
@@ -695,44 +696,44 @@ async function runReviewStep(api: TuiPluginApi, state: WizardState): Promise<Ste
     return "done"
   }
   try {
-    await saveLastApplied(lastAppliedFile(api.state.path), result.file, presetName!)
+    await saveLastApplied(lastAppliedFile(api.paths), result.file, presetName!)
     state.lastAppliedPreset = presetName
   } catch (error) {
-    api.ui.toast({
+    api.ui.toast.show({
       variant: "warning",
       message: `Configuration was applied, but the last applied preset name could not be saved: ${errorMessage(error)}`,
       duration: 8000,
     })
   }
-  api.ui.toast({
+  api.ui.toast.show({
     variant: "success",
     title: "Agent models updated",
     message: result.hotApplied
-      ? `Applied preset "${presetName}". Wrote ${result.file}. Applied live to this OpenCode server; other running OpenCode processes still need a restart.`
+      ? `Applied preset "${presetName}". Wrote ${result.file}. Applied live: all loaded locations on this server were reloaded; pending permissions and forms were cancelled. Other servers need a reload.`
       : `Applied preset "${presetName}". Wrote ${result.file}. Restart OpenCode sessions to apply the assignments (${result.detail}).`,
     duration: 8000,
   })
   return "done"
 }
 
-async function promptNewPresetName(api: TuiPluginApi, state: WizardState): Promise<string | undefined> {
+async function promptNewPresetName(api: ConfiguratorHost, state: WizardState): Promise<string | undefined> {
   while (true) {
     const name = await prompt(api, "Preset name", "Name this preset")
     if (name === undefined) return undefined
     const trimmed = name.trim()
     if (!trimmed) {
-      api.ui.toast({ variant: "warning", message: "Preset name cannot be empty." })
+      api.ui.toast.show({ variant: "warning", message: "Preset name cannot be empty." })
       continue
     }
     if (state.presets.some((entry) => entry.name === trimmed)) {
-      api.ui.toast({ variant: "warning", message: `Preset "${trimmed}" already exists. Use Update existing preset.` })
+      api.ui.toast.show({ variant: "warning", message: `Preset "${trimmed}" already exists. Use Update existing preset.` })
       continue
     }
     return trimmed
   }
 }
 
-async function selectPresetToUpdate(api: TuiPluginApi, state: WizardState): Promise<StoredPreset | undefined> {
+async function selectPresetToUpdate(api: ConfiguratorHost, state: WizardState): Promise<StoredPreset | undefined> {
   const selected = await select(
     api,
     "Select preset to update",
@@ -752,7 +753,7 @@ async function selectPresetToUpdate(api: TuiPluginApi, state: WizardState): Prom
 }
 
 async function refreshSelectedPreset(
-  api: TuiPluginApi,
+  api: ConfiguratorHost,
   state: WizardState,
   name: string,
 ): Promise<StoredPreset | undefined> {
@@ -762,7 +763,7 @@ async function refreshSelectedPreset(
   } catch (error) {
     state.presets = []
     state.presetStorageAvailable = false
-    api.ui.toast({
+    api.ui.toast.show({
       variant: "error",
       title: "Preset unavailable",
       message: `${errorMessage(error)} Configuration was not applied.`,
@@ -773,7 +774,7 @@ async function refreshSelectedPreset(
   const selected = state.presets.find((preset) => preset.name === name)
   const refreshed = latest.find((preset) => preset.name === name)
   if (!selected || !refreshed || !assignmentRecordsEqual(selected.assignments, refreshed.assignments)) {
-    api.ui.toast({
+    api.ui.toast.show({
       variant: "warning",
       message: `Preset "${name}" changed while the configurator was open. Reopen and select it again.`,
     })
@@ -829,7 +830,7 @@ function namedWriteUnavailableDescription(state: WizardState): string {
 }
 
 async function selectDecision(
-  api: TuiPluginApi,
+  api: ConfiguratorHost,
   title: string,
   models: readonly ModelOption[],
   suggestedVariant: string | undefined,
@@ -857,7 +858,7 @@ async function selectDecision(
   }
 }
 
-async function selectVariant(api: TuiPluginApi, model: ModelOption, suggested?: string): Promise<string | undefined> {
+async function selectVariant(api: ConfiguratorHost, model: ModelOption, suggested?: string): Promise<string | undefined> {
   if (model.variants.length === 0) return ""
   const selected = await select(
     api,
@@ -874,21 +875,15 @@ async function selectVariant(api: TuiPluginApi, model: ModelOption, suggested?: 
   return selected === NO_VARIANT ? "" : selected
 }
 
-async function loadCatalog(api: TuiPluginApi) {
-  const result = await api.client.provider.list()
-  return normalizeProviderCatalog(result)
+async function loadCatalog(api: ConfiguratorHost) {
+  return normalizeModelCatalog(await api.client.model.list({ location: { directory: api.paths.directory } }))
 }
 
-/**
- * The agent list comes live from the server, so built-in, repo and user agents are all configurable.
- * The v2 SDK groups are class instances reading `this.client`: call `agents` on its own receiver.
- */
-async function loadAgents(api: TuiPluginApi): Promise<LiveAgent[]> {
-  const app = (api.client as { app?: { agents?: (input: { directory?: string }) => Promise<unknown> } }).app
-  if (typeof app?.agents !== "function") {
-    throw new Error("This OpenCode server does not expose the agent list (GET /agent). Update OpenCode and retry.")
+async function loadAgents(api: ConfiguratorHost): Promise<LiveAgent[]> {
+  if (typeof api.client.agent?.list !== "function") {
+    throw new Error("This OpenCode server does not expose the agent list (GET /api/agent). Update OpenCode and retry.")
   }
-  return normalizeLiveAgents(await app.agents({ directory: api.state.path.directory }))
+  return normalizeLiveAgents(await api.client.agent.list({ location: { directory: api.paths.directory } }))
 }
 
 /** Review rows are grouped under the first primary in hub order that delegates to them explicitly. */
@@ -934,69 +929,21 @@ function variantDescription(model: ModelOption): string {
 }
 
 function select<Value extends string>(
-  api: TuiPluginApi,
+  api: ConfiguratorHost,
   title: string,
-  options: TuiDialogSelectOption<Value>[],
+  options: DialogSelectOption<Value>[],
   placeholder: string = BACK_HINT,
   current?: Value,
 ): Promise<Value | undefined> {
-  return new Promise((resolve) => {
-    const DialogSelect = api.ui.DialogSelect<Value>
-    let settled = false
-    const finish = (value?: Value) => {
-      if (settled) return
-      settled = true
-      resolve(value)
-    }
-    api.ui.dialog.replace(
-      () =>
-        DialogSelect({
-          title,
-          options,
-          current,
-          placeholder,
-          onSelect: (option) => {
-            finish(option.value)
-            api.ui.dialog.clear()
-          },
-        }),
-      () => finish(undefined),
-    )
-  })
+  return api.ui.dialog.select({ title, options, current, placeholder })
 }
 
-function confirmStep(api: TuiPluginApi, title: string, message: string): Promise<boolean | undefined> {
-  return new Promise((resolve) => {
-    const DialogConfirm = api.ui.DialogConfirm
-    let settled = false
-    const finish = (value?: boolean) => {
-      if (settled) return
-      settled = true
-      api.ui.dialog.clear()
-      resolve(value)
-    }
-    api.ui.dialog.replace(
-      () => DialogConfirm({ title, message: `${message}\n\n${BACK_HINT}`, onConfirm: () => finish(true), onCancel: () => finish(false) }),
-      () => finish(undefined),
-    )
-  })
+function confirmStep(api: ConfiguratorHost, title: string, message: string): Promise<boolean | undefined> {
+  return api.ui.dialog.confirm({ title, message: `${message}\n\n${BACK_HINT}` })
 }
 
-function prompt(api: TuiPluginApi, title: string, placeholder: string): Promise<string | undefined> {
-  return new Promise((resolve) => {
-    const DialogPrompt = api.ui.DialogPrompt
-    let settled = false
-    const finish = (value?: string) => {
-      if (settled) return
-      settled = true
-      api.ui.dialog.clear()
-      resolve(value)
-    }
-    api.ui.dialog.replace(
-      () => DialogPrompt({ title, placeholder, onConfirm: (value) => finish(value), onCancel: () => finish(undefined) }),
-      () => finish(undefined),
-    )
-  })
+function prompt(api: ConfiguratorHost, title: string, placeholder: string): Promise<string | undefined> {
+  return api.ui.dialog.prompt({ title, placeholder })
 }
 
 function errorMessage(error: unknown): string {

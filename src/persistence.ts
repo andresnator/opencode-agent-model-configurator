@@ -136,20 +136,44 @@ export async function readConfigSnapshot(file: string): Promise<ConfigSnapshot> 
 export function renderConfigChanges(snapshot: ConfigSnapshot, changes: readonly AgentChange[]): string {
   let content = snapshot.content
   for (const change of changes) {
+    const config = parseConfig(content, snapshot.file)
     if (change.action === "inherit") {
-      content = edit(content, ["agent", change.agent, "model"], undefined)
-      content = edit(content, ["agent", change.agent, "variant"], undefined)
-      const parsed = parseConfig(content, snapshot.file)
-      const agent = isRecord(parsed.agent) && isRecord(parsed.agent[change.agent]) ? parsed.agent[change.agent] : undefined
-      if (agent && Object.keys(agent).length === 0) content = edit(content, ["agent", change.agent], undefined)
+      // Remove both sources so an overridden legacy mapping cannot become active again.
+      for (const container of ["agent", "agents"] as const) {
+        const entries = config[container]
+        if (!isRecord(entries) || !isRecord(entries[change.agent])) continue
+        content = edit(content, [container, change.agent, "model"], undefined)
+        if (container === "agent") content = edit(content, [container, change.agent, "variant"], undefined)
+        const updated = parseConfig(content, snapshot.file)[container]
+        const entry = isRecord(updated) ? updated[change.agent] : undefined
+        if (isRecord(entry) && Object.keys(entry).length === 0) {
+          content = edit(content, [container, change.agent], undefined)
+        }
+      }
     } else {
-      content = edit(content, ["agent", change.agent, "model"], change.after.model)
-      content = edit(content, ["agent", change.agent, "variant"], change.after.variant)
+      const legacyEntry = isRecord(config.agent) && isRecord(config.agent[change.agent])
+      const nativeEntry = isRecord(config.agents) && isRecord(config.agents[change.agent])
+      const native = nativeEntry || (!legacyEntry && (isRecord(config.agents) || !isRecord(config.agent)))
+      if (native) {
+        const model = change.after.model
+        if (!model || model.indexOf("/") < 1) throw new Error(`Invalid model assignment: ${model}`)
+        const separator = model.indexOf("/")
+        const value = {
+          providerID: model.slice(0, separator),
+          model: model.slice(separator + 1),
+          ...(change.after.variant ? { variant: change.after.variant } : {}),
+        }
+        content = edit(content, ["agents", change.agent, "model"], value)
+      } else {
+        content = edit(content, ["agent", change.agent, "model"], change.after.model)
+        content = edit(content, ["agent", change.agent, "variant"], change.after.variant)
+      }
     }
   }
-
   const parsed = parseConfig(content, snapshot.file)
-  if (isRecord(parsed.agent) && Object.keys(parsed.agent).length === 0) content = edit(content, ["agent"], undefined)
+  for (const container of ["agent", "agents"]) {
+    if (isRecord(parsed[container]) && Object.keys(parsed[container]).length === 0) content = edit(content, [container], undefined)
+  }
   parseConfig(content, snapshot.file)
   return content
 }
@@ -903,15 +927,26 @@ export function displayConfigFile(scope: ConfigScope, file: string, runtime: Run
 }
 
 function extractMappings(config: Record<string, unknown>): Record<string, AgentMapping> {
-  if (!isRecord(config.agent)) return {}
-  const mappings: Record<string, AgentMapping> = {}
-  for (const [agent, value] of Object.entries(config.agent)) {
-    if (!isRecord(value)) continue
-    const model = typeof value.model === "string" ? value.model : undefined
-    const variant = typeof value.variant === "string" ? value.variant : undefined
-    mappings[agent] = { model, variant }
+  const mappings: Record<string, AgentMapping> = Object.create(null)
+  for (const container of ["agent", "agents"]) {
+    if (!isRecord(config[container])) continue
+    for (const [agent, value] of Object.entries(config[container])) {
+      if (!isRecord(value)) continue
+      if (container === "agents" && isRecord(value.model)) {
+        const model = typeof value.model.providerID === "string" && typeof value.model.model === "string"
+          ? `${value.model.providerID}/${value.model.model}` : undefined
+        mappings[agent] = { model, variant: typeof value.model.variant === "string" ? value.model.variant : undefined }
+      } else if (container === "agents" && typeof value.model === "string") {
+        const separator = value.model.indexOf("#")
+        mappings[agent] = separator < 0
+          ? { model: value.model, variant: undefined }
+          : { model: value.model.slice(0, separator), variant: value.model.slice(separator + 1) }
+      } else {
+        mappings[agent] = { model: typeof value.model === "string" ? value.model : undefined, variant: container === "agent" && typeof value.variant === "string" ? value.variant : undefined }
+      }
+    }
   }
-  return mappings
+  return Object.assign({}, mappings)
 }
 
 function edit(content: string, jsonPath: (string | number)[], value: unknown): string {
